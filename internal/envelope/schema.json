@@ -1,0 +1,13 @@
+[
+  { "name": "envelope_id",   "type": "STRING",    "mode": "NULLABLE" },
+  { "name": "event_ts",      "type": "TIMESTAMP", "mode": "NULLABLE" },
+  { "name": "ingested_ts",   "type": "TIMESTAMP", "mode": "NULLABLE" },
+  { "name": "kalshi_ts",     "type": "TIMESTAMP", "mode": "NULLABLE" },
+  { "name": "seq",           "type": "INT64",     "mode": "NULLABLE" },
+  { "name": "snapshot_seq",  "type": "INT64",     "mode": "NULLABLE" },
+  { "name": "type",          "type": "STRING",    "mode": "NULLABLE" },
+  { "name": "series_id",     "type": "STRING",    "mode": "NULLABLE" },
+  { "name": "contract_id",   "type": "STRING",    "mode": "NULLABLE" },
+  { "name": "market_ticker", "type": "STRING",    "mode": "NULLABLE" },
+  { "name": "raw_payload",   "type": "BYTES",     "mode": "NULLABLE" }
+]

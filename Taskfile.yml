@@ -1,0 +1,81 @@
+version: "3"
+
+includes:
+  ops:
+    taskfile: ./Taskfile.ops.yml
+
+vars:
+  PROJECT_ID: '{{.PROJECT_ID | default "your-gcp-project"}}'
+  REGION: '{{.REGION | default "us-east4"}}'
+  # `go install` writes to $GOBIN if set, else $GOPATH/bin. Resolve once so tasks
+  # work whether or not the user has that directory on PATH.
+  GOBIN_DIR:
+    sh: 'echo "${GOBIN:-$(go env GOPATH)/bin}"'
+
+tasks:
+  setup:
+    desc: Install local dev tooling (pinned versions)
+    cmds:
+      - go install github.com/evilmartians/lefthook/v2@v2.1.6
+      - go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.11.4
+      - go install golang.org/x/tools/cmd/goimports@v0.44.0
+      - "{{.GOBIN_DIR}}/lefthook install"
+
+  fmt:
+    desc: Format Go code
+    cmds:
+      - "{{.GOBIN_DIR}}/goimports -w ."
+      - go fmt ./...
+
+  lint:
+    desc: Run linters
+    cmds:
+      - "{{.GOBIN_DIR}}/golangci-lint run ./..."
+
+  test:
+    desc: Run unit tests
+    cmds:
+      - go test ./... -race -cover
+
+  test:integration:
+    desc: Run integration tests (require GCP creds)
+    cmds:
+      - go test -tags=integration ./... -race
+
+  build:
+    desc: Build all binaries to ./bin/
+    cmds:
+      - go build -o bin/ ./cmd/...
+
+  proto:
+    desc: Generate Go from .proto files via protoc
+    cmds:
+      - >-
+        protoc -I proto --go_out=. --go_opt=module=github.com/paulschick/kalshiflow-pipeline
+        proto/kalshiflow/envelope/v1/envelope.proto
+        proto/kalshiflow/orderbook/v1/snapshot.proto
+      - go mod tidy
+
+  tf:init:
+    desc: Initialise Terraform
+    dir: infra
+    cmds:
+      - terraform init -backend-config="bucket={{.PROJECT_ID}}-tf-state" -backend-config="prefix=infra"
+
+  tf:validate:
+    desc: Terraform validate
+    dir: infra
+    cmds:
+      - terraform validate
+
+  tf:plan:
+    desc: Terraform plan
+    dir: infra
+    cmds:
+      - terraform plan -var "project_id={{.PROJECT_ID}}" -var "region={{.REGION}}"
+
+  tf:apply:
+    desc: Terraform apply
+    dir: infra
+    cmds:
+      - terraform apply -var "project_id={{.PROJECT_ID}}" -var "region={{.REGION}}"

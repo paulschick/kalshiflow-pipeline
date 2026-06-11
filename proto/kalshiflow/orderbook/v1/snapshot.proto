@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package kalshiflow.orderbook.v1;
+
+option go_package = "github.com/paulschick/kalshiflow-pipeline/internal/orderbook/orderbookpb;orderbookpb";
+
+// SnapshotPayload is the inner payload of a kalshi.snapshot_1s envelope.
+// market_ticker and event_ts are NOT duplicated here — the outer Envelope
+// already carries them. Keeping the inner narrow is how this stream's wire
+// shrinks ~70% vs the JSON predecessor.
+message SnapshotPayload {
+  string side = 1;
+  int64 top1_price_units = 2;
+  int64 top1_size = 3;
+  optional int64 top2_price_units = 4;
+  optional int64 top2_size = 5;
+  string emit_reason = 6;
+}

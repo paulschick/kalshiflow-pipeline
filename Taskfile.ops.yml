@@ -1,0 +1,812 @@
+version: "3"
+
+# Ops tasks: gcloud / bq / terraform shortcuts for day-to-day deployment,
+# debugging, and visibility on the kalshiflow GCP project. Included from the
+# root Taskfile under the `ops:` namespace. Discover with `task -l`.
+#
+# Inherited from root: PROJECT_ID, REGION.
+
+vars:
+  WS_WORKER_POOL: ws-worker
+  AR_REPO: kalshi
+  AR_HOST: '{{.REGION}}-docker.pkg.dev'
+  BQ_DATASET: kalshi_raw
+  PUBSUB_SCHEMA: kalshi-envelope-v1
+  TF_STATE_BUCKET: '{{.PROJECT_ID}}-tf-state'
+  TF_STATE_OBJECT: gs://{{.PROJECT_ID}}-tf-state/infra/default.tflock
+  TFVARS_PATH: infra/terraform.tfvars
+  # Stream → fully-qualified BQ `dataset.table`. Kalshi rows live in kalshi_raw;
+  # Kraken rows live in kraken_raw (HOL-48). Templates that derive TABLE from
+  # this map use the FQ form directly (no separate dataset prefix).
+  STREAM_TABLE_MAP: |
+    case "$STREAM" in
+      snapshot_1s)        echo kalshi_raw.orderbook_snapshots_1s ;;
+      trade)              echo kalshi_raw.trade_events ;;
+      lifecycle)          echo kalshi_raw.lifecycle_events ;;
+      settlement)         echo kalshi_raw.settlement_events ;;
+      kraken_snapshot_1s) echo kraken_raw.orderbook_snapshots_1s ;;
+      kraken_trade)       echo kraken_raw.trade_events ;;
+      *) echo "unknown STREAM=$STREAM (want snapshot_1s|trade|lifecycle|settlement|kraken_snapshot_1s|kraken_trade)" >&2; exit 2 ;;
+    esac
+
+tasks:
+  # ─────────────────────────────────────────────────────────────────────
+  # worker:* — Cloud Run worker pool (ws-worker)
+  # ─────────────────────────────────────────────────────────────────────
+
+  worker:status:
+    desc: Summarise ws-worker pool (image, instance count, ready revision, condition)
+    silent: true
+    cmds:
+      - >-
+        gcloud run worker-pools describe {{.WS_WORKER_POOL}}
+        --region={{.REGION}} --project={{.PROJECT_ID}} --format=json
+        | jq -r '
+          "image:           " + (.spec.template.spec.containers[0].image // "?"),
+          "instance_count:  " + (.metadata.annotations["run.googleapis.com/manualInstanceCount"] // "?"),
+          "scaling_mode:    " + (.metadata.annotations["run.googleapis.com/scalingMode"] // "?"),
+          "ready_revision:  " + (.status.latestReadyRevisionName // "?"),
+          "ready_condition: " + ((.status.conditions[]? | select(.type=="Ready") | .status + " " + (.message // "")) // "?")'
+
+  worker:image:
+    desc: Print live ws-worker image tag
+    silent: true
+    cmds:
+      - >-
+        gcloud run worker-pools describe {{.WS_WORKER_POOL}}
+        --region={{.REGION}} --project={{.PROJECT_ID}}
+        --format='value(spec.template.spec.containers[0].image)'
+
+  worker:logs:
+    desc: 'Tail recent ws-worker logs (vars: SINCE=5m)'
+    silent: true
+    vars:
+      SINCE: '{{.SINCE | default "5m"}}'
+    cmds:
+      - >-
+        gcloud logging read
+        'resource.type=cloud_run_worker_pool
+         AND resource.labels.worker_pool_name={{.WS_WORKER_POOL}}
+         AND timestamp >= "'$(date -u -v-{{.SINCE}} +%Y-%m-%dT%H:%M:%SZ)'"'
+        --project={{.PROJECT_ID}} --order=asc --limit=200 --format=json
+        | jq -r '.[] | (.timestamp // "?") + "  " + (.severity // "?") + "  " + ((.jsonPayload.message // .textPayload // (.jsonPayload | tostring)) | tostring)'
+
+  worker:logs:errors:
+    desc: 'Tail ws-worker logs at WARNING+ (vars: SINCE=1h)'
+    silent: true
+    vars:
+      SINCE: '{{.SINCE | default "1h"}}'
+    cmds:
+      - >-
+        gcloud logging read
+        'resource.type=cloud_run_worker_pool
+         AND resource.labels.worker_pool_name={{.WS_WORKER_POOL}}
+         AND severity>=WARNING
+         AND timestamp >= "'$(date -u -v-{{.SINCE}} +%Y-%m-%dT%H:%M:%SZ)'"'
+        --project={{.PROJECT_ID}} --order=asc --limit=200 --format=json
+        | jq -r '.[] | (.timestamp // "?") + "  " + (.severity // "?") + "  " + ((.jsonPayload.message // .textPayload // (.jsonPayload | tostring)) | tostring)'
+
+  worker:revisions:
+    desc: List recent ws-worker revisions (image + active state)
+    silent: true
+    cmds:
+      - >-
+        gcloud run worker-pools revisions list
+        --worker-pool={{.WS_WORKER_POOL}} --region={{.REGION}} --project={{.PROJECT_ID}}
+        --limit=10 --format='table(name,image.basename(),active,createTime.date(tz=LOCAL))'
+
+  worker:scale:
+    desc: |
+      Scale ws-worker to COUNT instances by editing terraform.tfvars and
+      running terraform apply (targeted). DESTRUCTIVE when COUNT=0 (drains pod).
+    requires:
+      vars: [COUNT]
+    prompt: 'Scale {{.WS_WORKER_POOL}} ws_worker_instance_count → {{.COUNT}} via terraform apply?'
+    silent: true
+    cmds:
+      - |
+        set -eu
+        current=$(awk -F'=' '/^[[:space:]]*ws_worker_instance_count[[:space:]]*=/ {gsub(/[[:space:]]/,"",$2); print $2; exit}' {{.TFVARS_PATH}})
+        echo "current ws_worker_instance_count: ${current:-<unset>}"
+        echo "new:                              {{.COUNT}}"
+        if grep -qE '^[[:space:]]*ws_worker_instance_count[[:space:]]*=' {{.TFVARS_PATH}}; then
+          sed -i.bak -E 's/^([[:space:]]*ws_worker_instance_count[[:space:]]*=[[:space:]]*).*/\1{{.COUNT}}/' {{.TFVARS_PATH}}
+          rm -f {{.TFVARS_PATH}}.bak
+        else
+          printf '\nws_worker_instance_count = %s\n' '{{.COUNT}}' >> {{.TFVARS_PATH}}
+        fi
+      - cd infra && terraform apply -target=google_cloud_run_v2_worker_pool.ws_worker -var "project_id={{.PROJECT_ID}}" -var "region={{.REGION}}"
+
+  # ─────────────────────────────────────────────────────────────────────
+  # image:* — Artifact Registry (kalshi/ws-worker)
+  # ─────────────────────────────────────────────────────────────────────
+
+  image:list:
+    desc: 'List image tags + create time, newest first (vars: BIN=ws-worker)'
+    silent: true
+    vars:
+      BIN: '{{.BIN | default "ws-worker"}}'
+      AR_IMAGE: '{{.REGION}}-docker.pkg.dev/{{.PROJECT_ID}}/{{.AR_REPO}}/{{.BIN}}'
+    cmds:
+      - >-
+        gcloud artifacts docker tags list {{.AR_IMAGE}}
+        --project={{.PROJECT_ID}} --format=json
+        | jq -r 'sort_by(.tag) | reverse | .[] | (.tag // "?") + "  " + (.version // "" | .[0:19])' | head -20
+
+  image:current:
+    desc: 'Print ws-worker image tag from infra/terraform.tfvars (ws-worker-only; non-ws-worker images: read tfvars directly)'
+    silent: true
+    cmds:
+      - >-
+        awk -F'"' '/^[[:space:]]*ws_worker_image[[:space:]]*=/ {print $2; exit}' {{.TFVARS_PATH}}
+
+  image:build:
+    desc: 'podman build BIN:TAG (linux/amd64). Validates TAG=v\d+.\d+.\d+ and BIN allow-list (vars: BIN=ws-worker)'
+    requires:
+      vars: [TAG]
+    silent: true
+    vars:
+      BIN: '{{.BIN | default "ws-worker"}}'
+      AR_IMAGE: '{{.REGION}}-docker.pkg.dev/{{.PROJECT_ID}}/{{.AR_REPO}}/{{.BIN}}'
+    preconditions:
+      - sh: 'echo "{{.TAG}}" | grep -Eq "^v[0-9]+\.[0-9]+\.[0-9]+$"'
+        msg: 'TAG="{{.TAG}}" must match v\d+.\d+.\d+'
+      - sh: 'echo "{{.BIN}}" | grep -Eq "^(ws-worker|parquet-exporter|series-discovery|kraken-ws-worker)$"'
+        msg: 'BIN="{{.BIN}}" must be one of: ws-worker, parquet-exporter, series-discovery, kraken-ws-worker'
+    cmds:
+      - podman build --platform linux/amd64 -t {{.AR_IMAGE}}:{{.TAG}} -f docker/{{.BIN}}/Dockerfile .
+      - echo "built {{.AR_IMAGE}}:{{.TAG}}"
+
+  image:push:
+    # Has a confirm prompt (`prompt:` below). Non-TTY callers (Claude Code Bash, subagent shells, CI)
+    # must invoke as `task -y ops:image:push BIN=... TAG=...` or the task aborts mid-run with
+    # "cancelled because it has a prompt and the environment is not a terminal".
+    desc: 'Push BIN:TAG to Artifact Registry (vars: BIN=ws-worker; non-TTY callers: pass `-y`)'
+    requires:
+      vars: [TAG]
+    silent: true
+    vars:
+      BIN: '{{.BIN | default "ws-worker"}}'
+      AR_IMAGE: '{{.REGION}}-docker.pkg.dev/{{.PROJECT_ID}}/{{.AR_REPO}}/{{.BIN}}'
+    preconditions:
+      - sh: 'echo "{{.TAG}}" | grep -Eq "^v[0-9]+\.[0-9]+\.[0-9]+$"'
+        msg: 'TAG="{{.TAG}}" must match v\d+.\d+.\d+'
+      - sh: 'echo "{{.BIN}}" | grep -Eq "^(ws-worker|parquet-exporter|series-discovery|kraken-ws-worker)$"'
+        msg: 'BIN="{{.BIN}}" must be one of: ws-worker, parquet-exporter, series-discovery, kraken-ws-worker'
+    prompt: 'Push {{.AR_IMAGE}}:{{.TAG}} to Artifact Registry?'
+    cmds:
+      - gcloud auth print-access-token | podman login -u oauth2accesstoken --password-stdin {{.AR_HOST}}
+      - podman push {{.AR_IMAGE}}:{{.TAG}}
+      - >-
+        gcloud artifacts docker images describe {{.AR_IMAGE}}:{{.TAG}}
+        --project={{.PROJECT_ID}} --format='value(image_summary.digest)'
+
+  image:deploy:
+    desc: 'Build + push BIN:TAG (does NOT cut the running service over)'
+    requires:
+      vars: [TAG]
+    vars:
+      BIN: '{{.BIN | default "ws-worker"}}'
+    cmds:
+      - task: image:build
+        vars: { TAG: '{{.TAG}}', BIN: '{{.BIN}}' }
+      - task: image:push
+        vars: { TAG: '{{.TAG}}', BIN: '{{.BIN}}' }
+
+  # ─────────────────────────────────────────────────────────────────────
+  # ps:* — Pub/Sub
+  # ─────────────────────────────────────────────────────────────────────
+
+  ps:topics:
+    desc: List kalshi.* topics with schema + encoding
+    silent: true
+    cmds:
+      - >-
+        gcloud pubsub topics list --project={{.PROJECT_ID}} --format=json
+        | jq -r '.[] | select(.name|test("/topics/kalshi\\.")) | (.name|sub(".*/topics/";"")) + "  schema=" + ((.schemaSettings.schema // "—")|sub(".*/schemas/";"")) + "  encoding=" + (.schemaSettings.encoding // "—")'
+
+  ps:subs:
+    desc: List kalshi.*.bq subs with state + BQ schema flags
+    silent: true
+    cmds:
+      - >-
+        gcloud pubsub subscriptions list --project={{.PROJECT_ID}} --format=json
+        | jq -r '.[] | select(.name|test("/subscriptions/kalshi\\.")) | (.name|sub(".*/subscriptions/";"")) + "  state=" + (.state // "?") + "  use_topic_schema=" + ((.bigqueryConfig.useTopicSchema // false)|tostring) + "  use_table_schema=" + ((.bigqueryConfig.useTableSchema // false)|tostring) + "  write_metadata=" + ((.bigqueryConfig.writeMetadata // false)|tostring)'
+
+  ps:topic:describe:
+    desc: 'Full describe for kalshi.STREAM topic (vars: STREAM=...)'
+    requires:
+      vars: [STREAM]
+    silent: true
+    cmds:
+      - gcloud pubsub topics describe kalshi.{{.STREAM}} --project={{.PROJECT_ID}}
+
+  ps:sub:describe:
+    desc: 'Full describe for kalshi.STREAM.bq subscription (vars: STREAM=...)'
+    requires:
+      vars: [STREAM]
+    silent: true
+    cmds:
+      - gcloud pubsub subscriptions describe kalshi.{{.STREAM}}.bq --project={{.PROJECT_ID}}
+
+  ps:dlq:pull:
+    desc: 'Pull from kalshi.deadletter.bq (vars: LIMIT=10). Note BQ subs reject pull — DLQ has its own pull setup if present.'
+    silent: true
+    vars:
+      LIMIT: '{{.LIMIT | default "10"}}'
+    cmds:
+      - >-
+        gcloud pubsub subscriptions pull kalshi.deadletter.bq
+        --project={{.PROJECT_ID}} --limit={{.LIMIT}} --auto-ack=false
+        --format='table(message.publishTime.date(tz=LOCAL),message.attributes,message.data.decode(base64).slice(0,200))'
+
+  ps:schema:describe:
+    desc: Describe Pub/Sub envelope schema (kalshi-envelope-v1)
+    silent: true
+    cmds:
+      - gcloud pubsub schemas describe {{.PUBSUB_SCHEMA}} --project={{.PROJECT_ID}}
+
+  ps:dlq:count:
+    desc: 'Count dead_letter_events rows since N (vars: SINCE=10m)'
+    silent: true
+    vars:
+      SINCE: '{{.SINCE | default "10m"}}'
+      WINDOW_SQL:
+        sh: |
+          case "{{.SINCE}}" in
+            *m) echo "INTERVAL {{.SINCE | trimSuffix "m"}} MINUTE" ;;
+            *h) echo "INTERVAL {{.SINCE | trimSuffix "h"}} HOUR" ;;
+            *d) echo "INTERVAL {{.SINCE | trimSuffix "d"}} DAY" ;;
+            *)  echo "INTERVAL 10 MINUTE" ;;
+          esac
+    cmds:
+      - >-
+        bq query --project_id={{.PROJECT_ID}} --use_legacy_sql=false --format=pretty --quiet
+        "SELECT COUNT(*) AS dlq_rows FROM \`{{.PROJECT_ID}}.{{.BQ_DATASET}}.dead_letter_events\` WHERE publish_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), {{.WINDOW_SQL}})"
+
+  # ─────────────────────────────────────────────────────────────────────
+  # bq:* — BigQuery
+  # ─────────────────────────────────────────────────────────────────────
+
+  bq:rows:
+    desc: Count rows + distinct envelope_id for STREAM since SINCE (default 10m)
+    silent: true
+    requires:
+      vars: [STREAM]
+    vars:
+      SINCE: '{{.SINCE | default "10m"}}'
+      TABLE:
+        sh: STREAM='{{.STREAM}}'; {{.STREAM_TABLE_MAP}}
+      WINDOW_SQL:
+        sh: |
+          case "{{.SINCE}}" in
+            *m) echo "INTERVAL {{.SINCE | trimSuffix "m"}} MINUTE" ;;
+            *h) echo "INTERVAL {{.SINCE | trimSuffix "h"}} HOUR" ;;
+            *d) echo "INTERVAL {{.SINCE | trimSuffix "d"}} DAY" ;;
+            *)  echo "INTERVAL 10 MINUTE" ;;
+          esac
+    cmds:
+      - >-
+        bq query --project_id={{.PROJECT_ID}} --use_legacy_sql=false --format=pretty --quiet
+        "SELECT COUNT(*) AS row_count, COUNT(DISTINCT envelope_id) AS distinct_envelope_id
+         FROM \`{{.PROJECT_ID}}.{{.TABLE}}\`
+         WHERE event_ts >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), {{.WINDOW_SQL}})"
+
+  bq:rows:by-series:
+    desc: Count rows + distinct envelope_id for STREAM filtered by SERIES since SINCE (default 10m)
+    silent: true
+    requires:
+      vars: [STREAM, SERIES]
+    vars:
+      SINCE: '{{.SINCE | default "10m"}}'
+      TABLE:
+        sh: STREAM='{{.STREAM}}'; {{.STREAM_TABLE_MAP}}
+      WINDOW_SQL:
+        sh: |
+          case "{{.SINCE}}" in
+            *m) echo "INTERVAL {{.SINCE | trimSuffix "m"}} MINUTE" ;;
+            *h) echo "INTERVAL {{.SINCE | trimSuffix "h"}} HOUR" ;;
+            *d) echo "INTERVAL {{.SINCE | trimSuffix "d"}} DAY" ;;
+            *)  echo "INTERVAL 10 MINUTE" ;;
+          esac
+    cmds:
+      - >-
+        bq query --project_id={{.PROJECT_ID}} --use_legacy_sql=false --format=pretty --quiet
+        "SELECT COUNT(*) AS row_count, COUNT(DISTINCT envelope_id) AS distinct_envelope_id
+         FROM \`{{.PROJECT_ID}}.{{.TABLE}}\`
+         WHERE event_ts >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), {{.WINDOW_SQL}})
+           AND series_id = '{{.SERIES}}'"
+
+  bq:tail:
+    desc: 'Tail most recent N rows for STREAM (vars: LIMIT=5)'
+    silent: true
+    requires:
+      vars: [STREAM]
+    vars:
+      LIMIT: '{{.LIMIT | default "5"}}'
+      TABLE:
+        sh: STREAM='{{.STREAM}}'; {{.STREAM_TABLE_MAP}}
+    cmds:
+      - >-
+        bq query --project_id={{.PROJECT_ID}} --use_legacy_sql=false --format=pretty --quiet
+        "SELECT * FROM \`{{.PROJECT_ID}}.{{.TABLE}}\`
+         WHERE event_ts >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)
+         ORDER BY event_ts DESC LIMIT {{.LIMIT}}"
+
+  bq:schema:
+    desc: Show prettyjson schema for TABLE (e.g. orderbook_snapshots_1s)
+    silent: true
+    requires:
+      vars: [TABLE]
+    cmds:
+      - bq show --schema --format=prettyjson {{.PROJECT_ID}}:{{.BQ_DATASET}}.{{.TABLE}}
+
+  bq:cost:window:
+    desc: Per-stream rows + raw_payload bytes (avg/total) since SINCE (default 1h) — cost re-baseline
+    silent: true
+    vars:
+      SINCE: '{{.SINCE | default "1h"}}'
+      WINDOW_SQL:
+        sh: |
+          case "{{.SINCE}}" in
+            *m) echo "INTERVAL {{.SINCE | trimSuffix "m"}} MINUTE" ;;
+            *h) echo "INTERVAL {{.SINCE | trimSuffix "h"}} HOUR" ;;
+            *d) echo "INTERVAL {{.SINCE | trimSuffix "d"}} DAY" ;;
+            *)  echo "INTERVAL 1 HOUR" ;;
+          esac
+    cmds:
+      - >-
+        bq query --project_id={{.PROJECT_ID}} --use_legacy_sql=false --format=pretty --quiet
+        "WITH per AS (
+          SELECT 'snapshot_1s' AS stream, COUNT(*) AS row_count, AVG(BYTE_LENGTH(raw_payload)) AS avg_bytes, SUM(BYTE_LENGTH(raw_payload)) AS total_bytes
+            FROM \`{{.PROJECT_ID}}.{{.BQ_DATASET}}.orderbook_snapshots_1s\`
+            WHERE event_ts >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), {{.WINDOW_SQL}})
+          UNION ALL
+          SELECT 'trade', COUNT(*), AVG(BYTE_LENGTH(raw_payload)), SUM(BYTE_LENGTH(raw_payload))
+            FROM \`{{.PROJECT_ID}}.{{.BQ_DATASET}}.trade_events\`
+            WHERE event_ts >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), {{.WINDOW_SQL}})
+          UNION ALL
+          SELECT 'lifecycle', COUNT(*), AVG(BYTE_LENGTH(raw_payload)), SUM(BYTE_LENGTH(raw_payload))
+            FROM \`{{.PROJECT_ID}}.{{.BQ_DATASET}}.lifecycle_events\`
+            WHERE event_ts >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), {{.WINDOW_SQL}})
+          UNION ALL
+          SELECT 'settlement', COUNT(*), AVG(BYTE_LENGTH(raw_payload)), SUM(BYTE_LENGTH(raw_payload))
+            FROM \`{{.PROJECT_ID}}.{{.BQ_DATASET}}.settlement_events\`
+            WHERE event_ts >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), {{.WINDOW_SQL}})
+        ) SELECT * FROM per ORDER BY stream"
+
+  bq:dedup:check:
+    desc: Assert COUNT(*) == COUNT(DISTINCT envelope_id) for STREAM since SINCE (default 1h)
+    silent: true
+    requires:
+      vars: [STREAM]
+    vars:
+      SINCE: '{{.SINCE | default "1h"}}'
+      TABLE:
+        sh: STREAM='{{.STREAM}}'; {{.STREAM_TABLE_MAP}}
+      WINDOW_SQL:
+        sh: |
+          case "{{.SINCE}}" in
+            *m) echo "INTERVAL {{.SINCE | trimSuffix "m"}} MINUTE" ;;
+            *h) echo "INTERVAL {{.SINCE | trimSuffix "h"}} HOUR" ;;
+            *d) echo "INTERVAL {{.SINCE | trimSuffix "d"}} DAY" ;;
+            *)  echo "INTERVAL 1 HOUR" ;;
+          esac
+    cmds:
+      - |
+        set -eu
+        out=$(bq query --project_id={{.PROJECT_ID}} --use_legacy_sql=false --format=csv --quiet \
+          "SELECT COUNT(*) AS row_count, COUNT(DISTINCT envelope_id) AS uniq_count
+           FROM \`{{.PROJECT_ID}}.{{.TABLE}}\`
+           WHERE event_ts >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), {{.WINDOW_SQL}})" \
+          | tail -n +2)
+        rows=$(echo "$out" | cut -d, -f1)
+        uniq=$(echo "$out" | cut -d, -f2)
+        if [ "$rows" = "$uniq" ]; then
+          echo "PASS: rows=$rows uniq=$uniq ({{.STREAM}}, last {{.SINCE}})"
+        else
+          echo "FAIL: rows=$rows uniq=$uniq ({{.STREAM}}, last {{.SINCE}})"
+          exit 1
+        fi
+
+  bq:dlq:tail:
+    desc: 'Tail recent dead_letter_events rows (vars: LIMIT=20)'
+    silent: true
+    vars:
+      LIMIT: '{{.LIMIT | default "20"}}'
+    cmds:
+      - >-
+        bq query --project_id={{.PROJECT_ID}} --use_legacy_sql=false --format=pretty --quiet
+        "SELECT subscription_name, publish_time, SUBSTR(data, 1, 200) AS data_head
+         FROM \`{{.PROJECT_ID}}.{{.BQ_DATASET}}.dead_letter_events\`
+         WHERE publish_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
+         ORDER BY publish_time DESC LIMIT {{.LIMIT}}"
+
+  bq:row:decode-snapshot:
+    desc: Fetch one orderbook_snapshots_1s row, base64-decode raw_payload, decode via cmd/decode-snapshot
+    silent: true
+    cmds:
+      - |
+        set -eu
+        b64=$(bq query --project_id={{.PROJECT_ID}} --use_legacy_sql=false --format=json --quiet \
+          "SELECT raw_payload FROM \`{{.PROJECT_ID}}.{{.BQ_DATASET}}.orderbook_snapshots_1s\`
+           WHERE event_ts >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR)
+           ORDER BY event_ts DESC LIMIT 1" \
+          | jq -r '.[0].raw_payload // empty')
+        if [ -z "$b64" ]; then
+          echo "no orderbook_snapshots_1s rows in last 6h"; exit 1
+        fi
+        echo "$b64" | go run ./cmd/decode-snapshot
+
+  # ─────────────────────────────────────────────────────────────────────
+  # series:* — dynamic Kalshi series subscription (operator UX)
+  # ─────────────────────────────────────────────────────────────────────
+
+  series:check:
+    desc: |
+      Pre-flight: probe Kalshi /markets for open contracts under SERIES.
+      Exits 0 if >=1 open market, non-zero otherwise. Catches "phantom"
+      series that exist in /series but never opened any markets.
+    silent: true
+    requires:
+      vars: [SERIES]
+    cmds:
+      - |
+        set -eu
+        n=$(curl -sS "https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker={{.SERIES}}&status=open&limit=1" \
+          | jq '.markets | length')
+        if [ "${n:-0}" -ge 1 ]; then
+          echo "PASS: {{.SERIES}} has >=1 open market on Kalshi"
+        else
+          echo "FAIL: {{.SERIES}} has 0 open markets on Kalshi (phantom series; /series row exists but /markets is empty)"
+          echo "      override with FORCE=1 if you are pre-subscribing ahead of a known market open"
+          exit 1
+        fi
+
+  series:add:
+    desc: |
+      Subscribe SERIES (vars: SERIES=KX..., REASON="..."). Runs ops:series:check
+      first to refuse phantom series with 0 open markets on Kalshi; pass
+      FORCE=1 to skip the pre-flight (e.g. pre-subscribing ahead of a
+      scheduled market open).
+    silent: true
+    requires:
+      vars: [SERIES, REASON]
+    vars:
+      FORCE: '{{.FORCE | default ""}}'
+    cmds:
+      - |
+        if [ -z "{{.FORCE}}" ]; then
+          task ops:series:check SERIES={{.SERIES}}
+        else
+          echo "SKIP pre-flight: FORCE={{.FORCE}}"
+        fi
+      - >-
+        bq query --project_id={{.PROJECT_ID}} --use_legacy_sql=false --quiet
+        --parameter='ticker:STRING:{{.SERIES}}'
+        --parameter='reason:STRING:{{.REASON}}'
+        "INSERT INTO \`{{.PROJECT_ID}}.{{.BQ_DATASET}}.subscription_log\`
+          (ts, ticker, action, reason, actor)
+         VALUES (CURRENT_TIMESTAMP(), @ticker, 'subscribe', @reason, SESSION_USER())"
+      - >-
+        gcloud run jobs execute series-discovery
+        --region={{.REGION}} --project={{.PROJECT_ID}} --wait
+
+  series:remove:
+    desc: 'Unsubscribe SERIES (vars: SERIES=KX..., REASON="...")'
+    silent: true
+    requires:
+      vars: [SERIES, REASON]
+    cmds:
+      - >-
+        bq query --project_id={{.PROJECT_ID}} --use_legacy_sql=false --quiet
+        --parameter='ticker:STRING:{{.SERIES}}'
+        --parameter='reason:STRING:{{.REASON}}'
+        "INSERT INTO \`{{.PROJECT_ID}}.{{.BQ_DATASET}}.subscription_log\`
+          (ts, ticker, action, reason, actor)
+         VALUES (CURRENT_TIMESTAMP(), @ticker, 'unsubscribe', @reason, SESSION_USER())"
+      - >-
+        gcloud run jobs execute series-discovery
+        --region={{.REGION}} --project={{.PROJECT_ID}} --wait
+
+  series:list:
+    desc: Print currently-subscribed series (from v_series_subscribed)
+    silent: true
+    cmds:
+      - >-
+        bq query --project_id={{.PROJECT_ID}} --use_legacy_sql=false --format=pretty --quiet
+        "SELECT ticker FROM \`{{.PROJECT_ID}}.{{.BQ_DATASET}}.v_series_subscribed\`"
+
+  series:discover:
+    desc: Trigger series-discovery CR Job manually (refreshes desired.json + catalog tables)
+    silent: true
+    cmds:
+      - >-
+        gcloud run jobs execute series-discovery
+        --region={{.REGION}} --project={{.PROJECT_ID}} --wait
+
+  # ─────────────────────────────────────────────────────────────────────
+  # kraken:* — Kraken kill-switch (HOL-47)
+  # ─────────────────────────────────────────────────────────────────────
+
+  kraken:status:
+    desc: Print kraken_enabled.json (the Kraken kill-switch control file)
+    silent: true
+    cmds:
+      - >-
+        gcloud storage cat
+        gs://{{.PROJECT_ID}}-kalshi-archive/control/kraken_enabled.json
+
+  kraken:on:
+    desc: 'Flip kraken_enabled.json to enabled=true (vars: REASON="...")'
+    silent: true
+    requires:
+      vars: [REASON]
+    prompt: 'Flip kraken_enabled=true (REASON="{{.REASON}}")?'
+    cmds:
+      - |
+        set -eu
+        ulid=$(python3 -c 'import secrets,string; a=string.ascii_uppercase+string.digits; print("".join(secrets.choice(a) for _ in range(26)))')
+        ts=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+        actor=$(gcloud config get-value account 2>/dev/null)
+        jq -nc \
+          --argjson enabled true \
+          --arg gen "$ulid" \
+          --arg ts "$ts" \
+          --arg reason "{{.REASON}}" \
+          --arg actor "$actor" \
+          '{enabled: $enabled, generation: $gen, generated_at: $ts, reason: $reason, actor: $actor}' \
+        | gcloud storage cp - gs://{{.PROJECT_ID}}-kalshi-archive/control/kraken_enabled.json \
+            --content-type=application/json
+
+  kraken:off:
+    desc: 'Flip kraken_enabled.json to enabled=false (vars: REASON="...")'
+    silent: true
+    requires:
+      vars: [REASON]
+    prompt: 'Flip kraken_enabled=false (REASON="{{.REASON}}")?'
+    cmds:
+      - |
+        set -eu
+        ulid=$(python3 -c 'import secrets,string; a=string.ascii_uppercase+string.digits; print("".join(secrets.choice(a) for _ in range(26)))')
+        ts=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+        actor=$(gcloud config get-value account 2>/dev/null)
+        jq -nc \
+          --argjson enabled false \
+          --arg gen "$ulid" \
+          --arg ts "$ts" \
+          --arg reason "{{.REASON}}" \
+          --arg actor "$actor" \
+          '{enabled: $enabled, generation: $gen, generated_at: $ts, reason: $reason, actor: $actor}' \
+        | gcloud storage cp - gs://{{.PROJECT_ID}}-kalshi-archive/control/kraken_enabled.json \
+            --content-type=application/json
+
+  # ─────────────────────────────────────────────────────────────────────
+  # kraken:{check,add,remove,list,discover} — operator surface for the
+  # Kraken symbol set (HOL-49). Matches series:* shape.
+  # ─────────────────────────────────────────────────────────────────────
+
+  kraken:check:
+    desc: |
+      Pre-flight: probe Kraken /0/public/AssetPairs for PAIR (e.g. BTC/USD).
+      PASS iff error array is empty AND the input pair appears as a top-level
+      result key AND status == "online". FAIL otherwise with the verbatim
+      Kraken error string.
+    silent: true
+    requires:
+      vars: [PAIR]
+    cmds:
+      - |
+        set -eu
+        enc=$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' '{{.PAIR}}')
+        resp=$(curl -sS "https://api.kraken.com/0/public/AssetPairs?pair=${enc}")
+        if ! echo "${resp}" | jq -e --arg p '{{.PAIR}}' \
+             '.error == [] and (.result[$p].status == "online")' >/dev/null 2>&1; then
+          echo "FAIL: {{.PAIR}} — Kraken response: ${resp}"
+          exit 1
+        fi
+        echo "PASS: {{.PAIR}} is online on Kraken"
+
+  kraken:add:
+    desc: |
+      Subscribe PAIR to the active Kraken set (vars: PAIR=BTC/USD,
+      REASON="...", optional FORCE=1 to skip kraken:check). Inserts a row
+      to kraken_raw.subscription_log via parameterized bq query (injection-
+      safe), then triggers series-discovery synchronously so the
+      kraken_pairs.json manifest is rewritten before the task returns. End-
+      to-end worker pickup ≤60s after task exit.
+    silent: true
+    requires:
+      vars: [PAIR, REASON]
+    vars:
+      FORCE: '{{.FORCE | default ""}}'
+    cmds:
+      - |
+        if [ -z "{{.FORCE}}" ]; then
+          task ops:kraken:check PAIR='{{.PAIR}}'
+        else
+          echo "SKIP pre-flight: FORCE={{.FORCE}}"
+        fi
+      - >-
+        bq query --project_id={{.PROJECT_ID}} --use_legacy_sql=false --quiet
+        --parameter='pair:STRING:{{.PAIR}}'
+        --parameter='reason:STRING:{{.REASON}}'
+        "INSERT INTO \`{{.PROJECT_ID}}.kraken_raw.subscription_log\`
+          (ts, pair, action, reason, actor)
+         VALUES (CURRENT_TIMESTAMP(), @pair, 'subscribe', @reason, SESSION_USER())"
+      - >-
+        gcloud run jobs execute series-discovery
+        --region={{.REGION}} --project={{.PROJECT_ID}} --wait
+
+  kraken:remove:
+    desc: 'Unsubscribe PAIR from the active Kraken set (vars: PAIR=BTC/USD, REASON="...")'
+    silent: true
+    requires:
+      vars: [PAIR, REASON]
+    cmds:
+      - >-
+        bq query --project_id={{.PROJECT_ID}} --use_legacy_sql=false --quiet
+        --parameter='pair:STRING:{{.PAIR}}'
+        --parameter='reason:STRING:{{.REASON}}'
+        "INSERT INTO \`{{.PROJECT_ID}}.kraken_raw.subscription_log\`
+          (ts, pair, action, reason, actor)
+         VALUES (CURRENT_TIMESTAMP(), @pair, 'unsubscribe', @reason, SESSION_USER())"
+      - >-
+        gcloud run jobs execute series-discovery
+        --region={{.REGION}} --project={{.PROJECT_ID}} --wait
+
+  kraken:list:
+    desc: Print currently-subscribed Kraken pairs (from v_kraken_pairs_subscribed)
+    silent: true
+    cmds:
+      - >-
+        bq query --project_id={{.PROJECT_ID}} --use_legacy_sql=false --format=pretty --quiet
+        "SELECT pair FROM \`{{.PROJECT_ID}}.kraken_raw.v_kraken_pairs_subscribed\`"
+
+  kraken:discover:
+    desc: Trigger series-discovery CR Job manually (rewrites both series_desired.json AND kraken_pairs.json)
+    silent: true
+    cmds:
+      - >-
+        gcloud run jobs execute series-discovery
+        --region={{.REGION}} --project={{.PROJECT_ID}} --wait
+
+  # ─────────────────────────────────────────────────────────────────────
+  # exporter:* — parquet-exporter Cloud Run Job ops
+  # ─────────────────────────────────────────────────────────────────────
+
+  exporter:run-day:
+    desc: |
+      Trigger parquet-exporter for DAY=YYYY-MM-DD (UTC). Overrides EXPORT_DATE
+      on the Cloud Run Job for this execution only and waits for completion.
+      Use for HOL-50 smoke and any partition backfill — BQ Extract is idempotent.
+    silent: true
+    requires:
+      vars: [DAY]
+    cmds:
+      - >-
+        gcloud run jobs execute parquet-exporter
+        --region={{.REGION}} --project={{.PROJECT_ID}}
+        --update-env-vars=EXPORT_DATE={{.DAY}}
+        --wait
+
+  # ─────────────────────────────────────────────────────────────────────
+  # tf:* — Terraform ops (extends root tf:init/validate/plan/apply)
+  # ─────────────────────────────────────────────────────────────────────
+
+  tf:state:list:
+    desc: terraform state list
+    dir: infra
+    silent: true
+    cmds:
+      - terraform state list
+
+  tf:state:show:
+    desc: terraform state show RESOURCE=...
+    requires:
+      vars: [RESOURCE]
+    dir: infra
+    silent: true
+    cmds:
+      - terraform state show '{{.RESOURCE}}'
+
+  tf:lock:show:
+    desc: Read GCS-backend tflock object (who/when holds the apply lock)
+    silent: true
+    cmds:
+      - gsutil cat {{.TF_STATE_OBJECT}} 2>/dev/null || echo "no lock file at {{.TF_STATE_OBJECT}}"
+
+  tf:lock:break:
+    desc: |
+      terraform force-unlock LOCK_ID. SAFETY: confirm no live terraform
+      process (`pgrep -af terraform`) before running.
+    requires:
+      vars: [LOCK_ID]
+    dir: infra
+    prompt: 'Force-unlock terraform state with LOCK_ID={{.LOCK_ID}}? (run `pgrep -af terraform` first)'
+    cmds:
+      - terraform force-unlock -force {{.LOCK_ID}}
+
+  tf:plan:target:
+    desc: terraform plan -target=TARGET=...
+    requires:
+      vars: [TARGET]
+    dir: infra
+    cmds:
+      - terraform plan -target='{{.TARGET}}' -var "project_id={{.PROJECT_ID}}" -var "region={{.REGION}}"
+
+  tf:apply:target:
+    desc: terraform apply -target=TARGET=... (mutates infra)
+    requires:
+      vars: [TARGET]
+    dir: infra
+    prompt: 'terraform apply -target={{.TARGET}}?'
+    cmds:
+      - terraform apply -target='{{.TARGET}}' -var "project_id={{.PROJECT_ID}}" -var "region={{.REGION}}"
+
+  tf:tfvars:show:
+    desc: Print gitignored infra/terraform.tfvars (read-only)
+    silent: true
+    cmds:
+      - cat {{.TFVARS_PATH}}
+
+  # ─────────────────────────────────────────────────────────────────────
+  # dash:* — console URLs
+  # ─────────────────────────────────────────────────────────────────────
+
+  dash:worker:
+    desc: Print Cloud Run worker pool console URL
+    silent: true
+    cmds:
+      - echo "https://console.cloud.google.com/run/worker-pools/{{.REGION}}/{{.WS_WORKER_POOL}}/metrics?project={{.PROJECT_ID}}"
+
+  dash:bq:
+    desc: Print BigQuery dataset console URL
+    silent: true
+    cmds:
+      - echo "https://console.cloud.google.com/bigquery?project={{.PROJECT_ID}}&ws=!1m4!1m3!3m2!1s{{.PROJECT_ID}}!2s{{.BQ_DATASET}}"
+
+  dash:metrics:
+    desc: Print metrics explorer URL filtered to ws-worker
+    silent: true
+    cmds:
+      - echo "https://console.cloud.google.com/monitoring/metrics-explorer?project={{.PROJECT_ID}}"
+
+  # ─────────────────────────────────────────────────────────────────────
+  # smoke:* — live smoke tests
+  # ─────────────────────────────────────────────────────────────────────
+
+  smoke:ws:
+    desc: Live WS smoke — T+0/T+5/T+15/T+30 row-count checkpoints on orderbook_snapshots_1s
+    silent: true
+    cmds:
+      - |
+        set -eu
+        check () {
+          bq query --project_id={{.PROJECT_ID}} --use_legacy_sql=false --format=csv --quiet \
+            "SELECT COUNT(*) FROM \`{{.PROJECT_ID}}.{{.BQ_DATASET}}.orderbook_snapshots_1s\`
+             WHERE event_ts >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)" | tail -n 1
+        }
+        echo "T+0  rows: $(check)"
+        sleep 300;  echo "T+5  rows: $(check)"
+        sleep 600;  echo "T+15 rows: $(check)"
+        sleep 900;  echo "T+30 rows: $(check)"
+
+  # ─────────────────────────────────────────────────────────────────────
+  # observability:* — Cloud Monitoring dashboard + baseline capture
+  # ─────────────────────────────────────────────────────────────────────
+
+  dashboard:open:
+    desc: Print Cloud Monitoring dashboard URL for kalshiflow
+    silent: true
+    cmds:
+      - >-
+        printf 'https://console.cloud.google.com/monitoring/dashboards/builder/%s?project=%s\n'
+        "$(terraform -chdir=infra output -raw monitoring_dashboard_id | sed 's|projects/[^/]*/dashboards/||')"
+        "$(terraform -chdir=infra output -raw project_id)"
+
+  metrics:baseline:
+    desc: Print 24h baseline numbers (rows/24h per stream×series, DLQ rows). Paste output into docs/reference/system.md.
+    silent: true
+    cmds:
+      - bq query --use_legacy_sql=false --format=pretty < infra/queries/baseline.sql

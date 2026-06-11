@@ -1,0 +1,6 @@
+project_id    = "your-gcp-project"
+region        = "us-east4"
+kalshi_series = "KXBTCD"
+alert_email   = "you@example.com"
+# placeholder_image is set in slice 1.3a after the image is built and pushed:
+# placeholder_image = "us-east4-docker.pkg.dev/your-gcp-project/kalshi/placeholder:v0"

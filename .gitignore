@@ -1,0 +1,58 @@
+.claude/settings.local.json
+.claude/skills
+.mcp.json
+__ignore__*[.md,.csv]
+config.local.yaml
+cmd/scratch
+# binaries
+/bin/
+/tmp/
+
+# coverage + profiles
+*.out
+*.test
+*.prof
+
+# data dir (for local dev)
+/data/
+# admin sqlite from local runs
+admin.db
+admin.db-*
+
+# node / vite
+/ui/node_modules/
+/ui/dist/
+
+# terraform
+*.tfstate
+*.tfstate.*
+.terraform/
+# .terraform.lock.hcl is intentionally NOT ignored — commit it so terraform init resolves to identical provider builds.
+*.auto.tfvars
+*.tfvars
+!*.tfvars.example
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+backend.hcl
+!backend.hcl.example
+
+# env
+.env
+.env.*
+!.env.example
+
+# editor
+.DS_Store
+.vscode/
+.idea/
+
+# secrets — belt and suspenders
+*.pem
+*.key
+!deploy/**/*.tfvars.example
+# Added by code-review-graph
+.code-review-graph/

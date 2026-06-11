@@ -1,0 +1,20 @@
+pre-commit:
+  parallel: true
+  commands:
+    fmt:
+      glob: "*.go"
+      # Resolve via $(go env GOPATH)/bin so the pinned tool installed by
+      # `task setup` is used regardless of whether ~/go/bin is on PATH.
+      run: $(go env GOPATH)/bin/goimports -l {staged_files}
+      fail_text: "Run 'task fmt' to fix formatting"
+    lint:
+      glob: "*.go"
+      run: $(go env GOPATH)/bin/golangci-lint run ./...
+    tf-fmt:
+      glob: "infra/*.tf"
+      run: terraform fmt -check infra/
+
+pre-push:
+  commands:
+    test:
+      run: go test ./... -race

@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package kalshiflow.envelope.v1;
+
+option go_package = "github.com/paulschick/kalshiflow-pipeline/internal/envelope/envelopepb;envelopepb";
+
+// Envelope is the canonical wire format for kalshiflow Pub/Sub topics.
+// Field names match internal/envelope/schema.json (snake_case), which drives
+// the BigQuery table schema via infra/bigquery.tf. The proto-vs-BQ-schema
+// drift detector test pins the contract.
+//
+// Timestamps are int64 microseconds since Unix epoch. PS schema registry
+// rejects external imports (no google.protobuf.Timestamp). BQ Storage Write
+// API maps proto int64 to TIMESTAMP columns as micros-since-epoch.
+//
+// raw_payload is bytes. For the snapshot_1s stream it carries a marshalled
+// SnapshotPayload. For trade, lifecycle, settlement it carries UTF-8 JSON
+// bytes of the raw Kalshi message body.
+message Envelope {
+  string envelope_id = 1;
+  int64 event_ts = 2;            // micros since epoch
+  int64 ingested_ts = 3;         // micros since epoch
+  optional int64 kalshi_ts = 4;  // micros since epoch
+  optional int64 seq = 5;
+  optional int64 snapshot_seq = 6;
+  string type = 7;
+  string series_id = 8;
+  optional string contract_id = 9;
+  optional string market_ticker = 10;
+  bytes raw_payload = 11;
+}
