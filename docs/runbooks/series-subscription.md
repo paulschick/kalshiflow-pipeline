@@ -153,7 +153,7 @@ Expect mixed human + SA rows in `actor`. Cross-reference §2 for interpretation.
 
 ## 9. Bootstrap / DR fallback
 
-1. Edit `infra/terraform.tfvars` to set `kalshi_series = "KXHIGHNY,..."` (CSV; the current desired set is the 16 weather series, weather-only since 2026-06-10 per HOL-183).
+1. Edit `infra/terraform.tfvars` to set `kalshi_series = "KXHIGHNY,..."` (CSV; the current desired set is the 16 weather series, weather-only since 2026-06-10).
 2. `task tf:apply` — rolls a worker revision that boots from the env fallback.
 3. Re-populate `kalshi_raw.subscription_log` with subscribe rows for each ticker:
 

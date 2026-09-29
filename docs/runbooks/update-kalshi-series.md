@@ -20,7 +20,7 @@ In every other situation — including a fresh project bootstrap where slice-3 s
    +kalshi_series     = "KXHIGHNY,KXHIGHLAX,KXHIGHCHI,KXHIGHMIA,KXHIGHDEN,KXHIGHTDAL,KXHIGHTPHX,KXHIGHTBOS,KXHIGHTSEA,KXHIGHPHIL,KXHIGHTDC,KXHIGHTHOU,KXHIGHAUS,KXHIGHTSFO,KXHIGHTMIN,KXRAINNYC"
    ```
 
-   The current desired set is the 16 weather series (weather-only since 2026-06-10, HOL-183) — match
+   The current desired set is the 16 weather series (weather-only since 2026-06-10) — match
    whatever `v_series_subscribed` last held, not this example verbatim.
 
 2. Apply:
@@ -55,4 +55,4 @@ In every other situation — including a fresh project bootstrap where slice-3 s
 
 ## Why this file still exists
 
-Incoming links from old commit messages, Linear comments, and external bookmarks need a discoverable landing page. Deleting the file would 404 those references. Keep this banner + the DR stub in place; do not extend the file with routine-use content.
+Incoming links from old commit messages, tracker comments, and external bookmarks need a discoverable landing page. Deleting the file would 404 those references. Keep this banner + the DR stub in place; do not extend the file with routine-use content.

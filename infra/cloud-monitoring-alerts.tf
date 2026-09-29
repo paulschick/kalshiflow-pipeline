@@ -4,7 +4,7 @@
 # Console mobile app (per-user, per-device setting outside Terraform).
 #
 # Deferred signals (WS stall, data-stall loop dead, BQ row-count regression)
-# are tracked under the Observability hardening Linear milestone.
+# were tracked as later observability work.
 
 resource "google_monitoring_alert_policy" "dlq_growth" {
   display_name          = "kalshiflow / DLQ row growth"

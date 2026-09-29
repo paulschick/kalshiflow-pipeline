@@ -2,15 +2,15 @@
 
 kalshiflow is a managed-services GCP pipeline that subscribes to Kalshi market WebSocket feeds
 and persists every event to BigQuery (hot tier) and GCS Parquet (cold tier) for offline backtesting and ML research.
-**Collection is weather-only as of 2026-06-10 (HOL-183).** Active series = 16 weather tickers: KXHIGHNY, KXHIGHLAX,
+**Collection is weather-only as of 2026-06-10.** Active series = 16 weather tickers: KXHIGHNY, KXHIGHLAX,
 KXHIGHCHI, KXHIGHMIA, KXHIGHDEN, KXHIGHTDAL, KXHIGHTPHX, KXHIGHTBOS, KXHIGHTSEA, KXHIGHPHIL, KXHIGHTDC, KXHIGHTHOU,
 KXHIGHAUS, KXHIGHTSFO, KXHIGHTMIN, KXRAINNYC. The 1 s snapshot-on-change envelope contract is unchanged. The crypto
-series and the entire Kraken spot side are retired — see "Weather-only pivot (HOL-183)" below. Solo developer; the
+series and the entire Kraken spot side are retired — see "Weather-only pivot" below. Solo developer; the
 single-container `ws-worker` pool (1 vCPU + 512 MiB always-on — the gen2 always-allocated floor) is the fixed-cost
 dominator; everything else sits under free-tier thresholds at this scale. This doc is a thin pointer index — every claim links to a
 source-of-truth file or has a verify-with-this-task recipe.
 
-## Weather-only pivot (HOL-183, 2026-06-10)
+## Weather-only pivot (2026-06-10)
 
 Cutover timeline (UTC):
 
@@ -23,17 +23,10 @@ Cutover timeline (UTC):
 Retired crypto series (6): KXBTCD, KXDOGE, KXDOGED, KXETHD, KXSOLD, KXXRPD. Lifecycle `determined` events for
 crypto markets already listed at cutoff may trail in for ~1 week post-cutoff — expected, not a leak.
 
-**Historical crypto/Kraken archive is LOCAL-ONLY** after the GCP-side deletion (in progress under HOL-183):
-
-- Primary copy: `~/.cache/kalshiflow-backtest/9056c8c/` (the backtest repo's mirror, pin `9056c8c`).
-- Second copy: `/Users/paulschick/kalshiflow-archive-second-copy/9056c8c/` (same machine, different path).
-- Contents: all 6 stream prefixes (Kalshi snapshots_1s/trade/lifecycle/settlement + kraken/snapshots_1s,
-  kraken/trade; 2026-05-04 → 2026-06-10) plus `bq_catalog/` Parquet exports of the no-expiry BQ tables
-  (`series_catalog`, `market_catalog`, `subscription_log`, `kraken_raw.subscription_log`).
-
-> **⚠️ Pin-bump orphan warning.** The mirror root is keyed on the backtest repo's `KALSHIFLOW_PIN_SHA_SHORT`
-> (currently `9056c8c`). A pin bump invalidates the mirror path, and the old pin dir is the ONLY crypto copy —
-> migrate/copy it to the new pin dir before or with any pin bump, or the data is orphaned.
+**Historical crypto/Kraken data** (all 6 stream prefixes — Kalshi snapshots_1s/trade/lifecycle/settlement +
+kraken/snapshots_1s, kraken/trade; 2026-05-04 → 2026-06-10 — plus Parquet exports of the no-expiry BQ tables
+`series_catalog`, `market_catalog`, `subscription_log`, `kraken_raw.subscription_log`) was exported to offline storage
+before the GCP-side deletion.
 
 ## Binaries
 
@@ -41,7 +34,7 @@ crypto markets already listed at cutoff may trail in for ~1 week post-cutoff —
 |---------------------------------|---------------------------------------------------------------------------|---------------------------------|------------------------------------------------------------------------------------------------------------|
 | `ws-worker`                     | Subscribes Kalshi WS, publishes envelopes to Pub/Sub                      | `cmd/ws-worker/`                | image pinned in `infra/terraform.tfvars` (`ws_worker_image` var); deployed image: `task ops:worker:status` |
 | `parquet-exporter`              | Daily BQ → GCS Parquet export for all four streams, idempotent overwrite  | `cmd/parquet-exporter/`         | Cloud Run Job in `infra/cloud-run-jobs.tf`; daily trigger in `infra/cloud-scheduler.tf`                    |
-| `series-discovery`              | 6h Kalshi `/series` + `/markets` refresh; MERGEs hash-diffed rows into `kalshi_raw.series_catalog` and `kalshi_raw.market_catalog` | `cmd/series-discovery/`         | Cloud Run Job + Scheduler + alert in `infra/series-discovery.tf` (per-feature layout); image `series_discovery_image` in `infra/terraform.tfvars`. SA `ksh-series-discovery`. Added 2026-05-10 (HOL-24). Markets pass added 2026-05-10 (HOL-25). Operator surface: `subscription_log` (event log), `v_series_subscribed` (view), `control/series_desired.json` (GCS), `task ops:series:{add,remove,list,discover}`. |
+| `series-discovery`              | 6h Kalshi `/series` + `/markets` refresh; MERGEs hash-diffed rows into `kalshi_raw.series_catalog` and `kalshi_raw.market_catalog` | `cmd/series-discovery/`         | Cloud Run Job + Scheduler + alert in `infra/series-discovery.tf` (per-feature layout); image `series_discovery_image` in `infra/terraform.tfvars`. SA `ksh-series-discovery`. Added 2026-05-10. Markets pass added 2026-05-10. Operator surface: `subscription_log` (event log), `v_series_subscribed` (view), `control/series_desired.json` (GCS), `task ops:series:{add,remove,list,discover}`. |
 | `decode-snapshot`               | Dev tool — decode protobuf `raw_payload` (BYTES) → JSON for human reading | `cmd/decode-snapshot/`          | run locally via `go run ./cmd/decode-snapshot` (also driven by `task ops:bq:row:decode-snapshot`)          |
 | `scripts/dump_kalshi_series.py` | Export available Kalshi series via REST                                   | `scripts/dump_kalshi_series.py` | run locally (superseded for catalog purposes by `series-discovery` job + `kalshi_raw.series_catalog` table) |
 
@@ -69,7 +62,7 @@ crypto markets already listed at cutoff may trail in for ~1 week post-cutoff —
     - **Per-tick heartbeat**: `ws_data_stall_ticks_total{result=ok|tripped|skipped}` increments on every `dataStallLoop` tick. Alert on `rate(...{result="ok"}) == 0` over 5min — proves the loop is alive independent of the force-reconnect counter.
     - **Panic-recover**: `ws_data_stall_panics_total` counts recovered panics inside the loop body. Should always be 0 in steady state; non-zero indicates a code bug forced the watchdog into the recover path (which still calls `WS.Close` to surface the failure as a normal reconnect).
 - **Backoff ladder gauge**: `ws_backoff_attempt_current` (Int64Gauge, no labels) is recorded at every reconnect with the pre-reset attempt value. 0 = healthy reset (last session received ≥ `KALSHI_BACKOFF_DATA_THRESHOLD` trading frames before disconnect); > 0 = ladder escalating during a sustained zero-trading-frame outage. Used together with `ws_data_stall_force_reconnects_total` to distinguish a single flap from a sustained Kalshi-side stall.
-- Alerts: P0 wired (DLQ row growth, parquet-exporter run failure, series-discovery run failure). WS-side and row-count regression alerts deferred to later HOL-10 milestone slices.
+- Alerts: P0 wired (DLQ row growth, parquet-exporter run failure, series-discovery run failure). WS-side and row-count regression alerts were deferred to later observability work.
 
 ## Worker tunables (env kill-switches)
 
@@ -102,17 +95,17 @@ Via `task ops:bq:cost:window SINCE=24h` at 4 series (KXBTCD, KXETHD, KXSOLD, KXX
 
 Stored `raw_payload` ≈ 78 MB/day → ~2.4 GB/mo extrapolated.
 
-### Cost breakdown — calculated 2026-05-17 (post-HOL-62)
+### Cost breakdown — calculated 2026-05-17
 
 Calculated via the Cloud Billing Catalog API (`gcp-cost` MCP) against the Kalshi 4–5-series volumes above + the Kraken 5-pair
 volumes in the Kraken baseline subsection. Catalog SKU IDs in parens; verify with `https://cloud.google.com/run/pricing`
 etc. The pool is a multi-container pod hosting `ws-worker` (Kalshi, `cpu=500m memory=256Mi`) and `kraken-ws-worker` (Kraken,
 `cpu=500m memory=256Mi`) — pod sum = 1 vCPU + 512 MiB always-on. Supersedes the 2026-05-07 entry (pre-Kraken single-container)
-and the post-HOL-51 deployed shape (2 vCPU + 1 GiB) which doubled cost vs the HOL-51 plan until HOL-62 restored 1 vCPU + 512 MiB.
+and a briefly deployed 2 vCPU + 1 GiB shape that doubled cost vs plan until it was shrunk back to 1 vCPU + 512 MiB on 2026-05-17.
 
 | Service                                                  | Monthly  | Notes                                                                                            |
 |----------------------------------------------------------|---------:|--------------------------------------------------------------------------------------------------|
-| Cloud Run worker pool (1 vCPU + 512 MiB always-on; multi-container pre-HOL-183, single-container after — same shape, same cost) | $16.84 | SKUs `77E7-D935-BA67` (CPU $15.97) + `967D-19B3-F10F` (mem $0.88), us-east4, 730.5h/mo, post-free-tier; re-verified via gcp-cost MCP 2026-06-10 |
+| Cloud Run worker pool (1 vCPU + 512 MiB always-on; multi-container before the weather-only pivot, single-container after — same shape, same cost) | $16.84 | SKUs `77E7-D935-BA67` (CPU $15.97) + `967D-19B3-F10F` (mem $0.88), us-east4, 730.5h/mo, post-free-tier; re-verified via gcp-cost MCP 2026-06-10 |
 | Cloud Run job (parquet-exporter ~10 min/day)                          | ~$0.00 | Free-tier remainder absorbs it after ws-worker                                                    |
 | Cloud Run job (series-discovery 6h cron, ~30s/run)                    | ~$0.00 | Free-tier remainder                                                                              |
 | GCS Standard (~2.5 GiB recent + Kraken archive growth)               | ~$0.06 | SKU `5F7A-5173-CF5B`; older data tiers via `infra/gcs-archive.tf` lifecycle                       |
@@ -128,13 +121,13 @@ Worker pool dominates and is fixed-cost (independent of series/pair count at the
 series and 6th–10th Kraken pair will add to volumes but those volumes stay well within free tiers, so the marginal cost is
 near-zero until either (a) Pub/Sub crosses 10 GiB/mo, (b) Cloud Monitoring custom-metric volume crosses 150 MiB/mo (more
 time-series cardinality), or (c) BQ active storage crosses 10 GiB/mo. The Kalshi container is sized for the 10–20-series
-target per HOL-19; if soak testing shows it cliffs before 20 series at `cpu=500m`, scale the container limit up rather than
+target; if soak testing shows it cliffs before 20 series at `cpu=500m`, scale the container limit up rather than
 the instance count. Verify current burn against billing console; `task ops:bq:cost:window SINCE=24h` re-checks the volume
 side of the input.
 
-### Cost delta — HOL-183 weather-only pivot (2026-06-10)
+### Cost delta — weather-only pivot (2026-06-10)
 
-- **Worker pool compute: $0 delta — NOT the ~$8.42/mo the HOL-183 research projected.** Removing the
+- **Worker pool compute: $0 delta — NOT the ~$8.42/mo the pre-pivot research projected.** Removing the
   `kraken-ws-worker` sidecar does NOT shed its nominal 0.5 vCPU / 256 MiB, because the pool was already at the
   gen2 always-allocated floor (total CPU ≥ 1 vCPU, total memory ≥ 512 MiB). The old 2-container pod sat exactly
   at that floor (2× 500m/256Mi = 1 vCPU + 512 MiB); the surviving single `ws-worker` container is pinned to
@@ -149,7 +142,6 @@ side of the input.
   the realized monthly-bill decrease is small in absolute dollars — the win is halting unbounded growth of a
   no-consumer dataset, not a line-item cut.
 - Export egress for the archive copy-out: $0 (free tier) + ≤$0.05 one-time Nearline retrieval (measured).
-- Phase D (HOL-183) posts the measured before/after volume + storage decrease.
 
 ## Cold tier
 
@@ -171,11 +163,11 @@ idempotent — replays overwrite GCS objects in-place).
 
 ## Baseline
 
-> **Superseded by the weather-only pivot (2026-06-10, HOL-183).** The tables below are the last crypto-era
-> baseline, kept for the historical record. Post-pivot baseline at the 16-weather-series set lands in HOL-183
-> (Phase D) via `task ops:metrics:baseline`.
+> **Superseded by the weather-only pivot (2026-06-10).** The tables below are the last crypto-era
+> baseline, kept for the historical record. The project was torn down (2026-06-11) before a post-pivot baseline at the
+> 16-weather-series set was taken.
 
-Kalshi side measured 2026-05-11 over the prior 24h via `task ops:metrics:baseline` at 5 series (KXBTCD, KXDOGED, KXETHD, KXSOLD, KXXRPD) on `ws-worker:v0.15.0` + `parquet-exporter:v0.3.0`. Supersedes the 2026-05-08 baseline. Kraken side: pair set is now dynamic (HOL-49, 2026-05-15) — union of catalog mirror over `v_series_subscribed` + operator additions in `kraken_raw.subscription_log`; per-(stream, pair) volumes pending post-deploy 24h window via HOL-51.
+Kalshi side measured 2026-05-11 over the prior 24h via `task ops:metrics:baseline` at 5 series (KXBTCD, KXDOGED, KXETHD, KXSOLD, KXXRPD) on `ws-worker:v0.15.0` + `parquet-exporter:v0.3.0`. Supersedes the 2026-05-08 baseline. Kraken side: pair set is now dynamic (2026-05-15) — union of catalog mirror over `v_series_subscribed` + operator additions in `kraken_raw.subscription_log`; per-(stream, pair) volumes are in the Kraken subsection below.
 
 | Stream                         | Series                | Rows / 24h | Avg bytes |
 |--------------------------------|-----------------------|-----------:|----------:|
@@ -204,32 +196,32 @@ Kalshi side measured 2026-05-11 over the prior 24h via `task ops:metrics:baselin
 | ws_data_stall_force_reconnects | trigger=data_timeout  |          1 |         — |
 | ws_backoff_attempt_current     | —                     |          1 | (max obs) |
 
-5-series steady state on `ws-worker:v0.15.0` — KXDOGED was added during the slice-3 (HOL-26) smoke 2026-05-10 and is now visible across all four streams. Volumes scale linearly with series count; the per-series-per-stream rates for KXBTCD, KXETHD, KXSOLD, KXXRPD are consistent with the 2026-05-08 reading once normalized for the longer measurement window.
+5-series steady state on `ws-worker:v0.15.0` — KXDOGED was added during the slice-3 smoke 2026-05-10 and is now visible across all four streams. Volumes scale linearly with series count; the per-series-per-stream rates for KXBTCD, KXETHD, KXSOLD, KXXRPD are consistent with the 2026-05-08 reading once normalized for the longer measurement window.
 
 WS-stall health is quiet: `ws_data_stall_force_reconnects_total` fires once in the 24h window (down from 3 on 2026-05-08), `ws_watchdog_force_reconnects_total` is 0 (pong-deadline watchdog had nothing to fire on), and `ws_backoff_attempt_current` maxes at 1 — a transient single-step ladder bump with immediate reset to 0, consistent with a single short Kalshi-side blip that received the data-threshold count of frames before reconnect.
 
 Refresh: `task ops:metrics:baseline` for the per-(stream, series) numbers; query `ws_watchdog_force_reconnects_total`, `ws_data_stall_force_reconnects_total`, and `ws_backoff_attempt_current` over a 24h window via Cloud Monitoring REST for the counter/gauge rows. Supersede in place — git owns history.
 
-### Kraken — RETIRED 2026-06-10 (HOL-183); post-HOL-49 shape below (2026-05-15)
+### Kraken — RETIRED 2026-06-10; shape below (2026-05-15)
 
 > The Kraken side is fully retired: `kraken_enabled.json` flipped off 2026-06-10T11:19:10Z, container removed
-> from the pool, topics/subs/`kraken_raw` tables/flag deleted via terraform. Historical data is local-only
-> (see "Weather-only pivot" above). The subsection below describes the retired system.
+> from the pool, topics/subs/`kraken_raw` tables/flag deleted via terraform. Historical data was exported
+> offline (see "Weather-only pivot" above). The subsection below describes the retired system.
 
-`kraken-ws-worker` collected WS v2 `book` (depth=10) + `trade` for a dynamic pair set computed from two sources: the catalog mirror over `kalshi_raw.v_series_subscribed` (Kalshi-tracked assets auto-propagate to Kraken via the `KX<asset>*` prefix extractor in `internal/kraken/symbol.ExtractAssets`) plus operator-controlled additions in `kraken_raw.subscription_log`. Bookkeeper-aggregated 1 s change-tick + 300 s heartbeat per `(pair, side)`; trade frames passthrough one envelope per trade. Gated by the HOL-47 kill switch.
+`kraken-ws-worker` collected WS v2 `book` (depth=10) + `trade` for a dynamic pair set computed from two sources: the catalog mirror over `kalshi_raw.v_series_subscribed` (Kalshi-tracked assets auto-propagate to Kraken via the `KX<asset>*` prefix extractor in `internal/kraken/symbol.ExtractAssets`) plus operator-controlled additions in `kraken_raw.subscription_log`. Bookkeeper-aggregated 1 s change-tick + 300 s heartbeat per `(pair, side)`; trade frames passthrough one envelope per trade. Gated by a GCS-backed kill switch (`control/kraken_enabled.json`).
 
 | Resource                                       | Shape                                                                       |
 |------------------------------------------------|-----------------------------------------------------------------------------|
-| Worker pool                                    | Shares `ws-worker` pool (us-east4, multi-container pod totaling 1 vCPU + 512 MiB, manual instance count 1) — runs as sidecar container `kraken-ws-worker` with `cpu=500m memory=256Mi` after HOL-62 shrink 2026-05-17 (post-HOL-51 consolidation 2026-05-15). |
+| Worker pool                                    | Shares `ws-worker` pool (us-east4, multi-container pod totaling 1 vCPU + 512 MiB, manual instance count 1) — runs as sidecar container `kraken-ws-worker` with `cpu=500m memory=256Mi` after the 2026-05-17 shrink (consolidated into one pool 2026-05-15). |
 | Topics                                         | `kraken.snapshot_1s`, `kraken.trade` (`kalshi-envelope-v1` schema, BINARY)  |
 | BQ tables                                      | `kraken_raw.orderbook_snapshots_1s` (7 d), `kraken_raw.trade_events` (14 d) |
 | BQ control                                     | `kraken_raw.subscription_log` (audit, retain forever) + `kraken_raw.v_kraken_pairs_subscribed` (latest-action-per-pair view) |
 | Pair set source                                | union of catalog mirror (over `kalshi_raw.v_series_subscribed`) + `v_kraken_pairs_subscribed`; written to `control/kraken_pairs.json` |
 | Operator surface                               | `task ops:kraken:{check,add,remove,list,discover}` — mirrors `ops:series:*` shape |
 | DLQ                                            | reuses `kalshi.deadletter` topic + sub                                      |
-| Cost (verified via `gcp-cost` MCP, 2026-05-17, post-HOL-62 shrink) | ~$0.04 / mo incremental (shares `ws-worker` pool with kalshi; only Pub/Sub→BQ delivery is Kraken-attributable). Pool cost ~$16.84 / mo single-pool (1 vCPU + 512 MiB pod, 500m/256Mi per container). SKUs `77E7-D935-BA67` + `967D-19B3-F10F` + `FCD2-1531-9A6F`. Supersedes the 2026-05-15 entry which claimed `~$16.83 / mo unchanged`; in reality the post-HOL-51 deployed shape (1000m/512Mi per container = 2 vCPU + 1 GiB pod) cost ~$33.68 / mo until HOL-62 corrected it 2026-05-17. |
+| Cost (verified via `gcp-cost` MCP, 2026-05-17) | ~$0.04 / mo incremental (shares `ws-worker` pool with kalshi; only Pub/Sub→BQ delivery is Kraken-attributable). Pool cost ~$16.84 / mo single-pool (1 vCPU + 512 MiB pod, 500m/256Mi per container). SKUs `77E7-D935-BA67` + `967D-19B3-F10F` + `FCD2-1531-9A6F`. Supersedes the 2026-05-15 entry which claimed `~$16.83 / mo unchanged`; in reality the deployed shape (1000m/512Mi per container = 2 vCPU + 1 GiB pod) cost ~$33.68 / mo until the 2026-05-17 shrink corrected it. |
 
-Per-(stream, pair) row volumes measured 2026-05-14 22:44Z → 2026-05-15 22:43Z on `kraken-ws-worker:v0.2.0` (post-HOL-53 fixes), 5 stable pairs. Supersedes the HOL-49 placeholder.
+Per-(stream, pair) row volumes measured 2026-05-14 22:44Z → 2026-05-15 22:43Z on `kraken-ws-worker:v0.2.0`, 5 stable pairs.
 
 | Stream      | Pair     | Rows / 24h | Avg bytes |
 |-------------|----------|-----------:|----------:|
@@ -259,15 +251,15 @@ WS health (24h sums, Cloud Monitoring REST, `ALIGN_DELTA`):
 | `kraken_pubsub_publish_failures_total` |          0  |
 | `kraken_pubsub_drain_unflushed_total`  |          0  |
 
-24h dedup-clean confirmed: 328,165 snapshot rows / 328,165 unique envelope_id; 98,381 trade rows / 98,381 unique envelope_id. HOL-53 reconnect-storm symptom is contained (133/24h, all silent-stall-driven; no subscribe-rate trips) but the underlying checksum-mismatch rate of ~64/s is unresolved — root cause tracked under HOL-53 §5.5 follow-up. The dropped-resub counter equals the mismatch counter 1:1, proving the rate-limiter is doing its containing job.
+24h dedup-clean confirmed: 328,165 snapshot rows / 328,165 unique envelope_id; 98,381 trade rows / 98,381 unique envelope_id. The reconnect-storm symptom is contained (133/24h, all silent-stall-driven; no subscribe-rate trips) but the underlying checksum-mismatch rate of ~64/s was never root-caused before Kraken was retired. The dropped-resub counter equals the mismatch counter 1:1, proving the rate-limiter is doing its containing job.
 
 ### Control plane
 
 | Object                                                           | Source of truth                                                                          | Writer                              | Reader                                       |
 |------------------------------------------------------------------|------------------------------------------------------------------------------------------|-------------------------------------|----------------------------------------------|
 | `control/series_desired.json`                                     | `kalshi_raw.v_series_subscribed`                                                         | `series-discovery` (6 h cron + adhoc) | `ws-worker` (60 s poll, `Attrs.Generation`)  |
-| `control/kraken_pairs.json` (HOL-49)                              | RETIRED 2026-06-10 (HOL-183) — no longer written or read                                  | —                                   | —                                            |
-| `control/kraken_enabled.json` (HOL-47)                            | RETIRED 2026-06-10 (HOL-183) — flipped off 11:19:10Z, then infra deleted                  | —                                   | —                                            |
+| `control/kraken_pairs.json`                              | RETIRED 2026-06-10 — no longer written or read                                  | —                                   | —                                            |
+| `control/kraken_enabled.json`                            | RETIRED 2026-06-10 — flipped off 11:19:10Z, then infra deleted                  | —                                   | —                                            |
 
 The `series_desired.json` write uses an atomic `If-Generation-Match` pattern (`internal/seriescat.WriteDesiredSet`) so concurrent writers (scheduled 6 h tick + operator-triggered run) cannot lose updates — the loser surfaces 412 and Cloud Scheduler `retry_count=3` covers transient losses.
 

@@ -1,13 +1,13 @@
 # Runbook — kraken-flag kill switch
 
-> **RETIRED 2026-06-10 (HOL-183).** Kraken collection was disabled via this flag at 2026-06-10T11:19:10Z
+> **RETIRED 2026-06-10.** Kraken collection was disabled via this flag at 2026-06-10T11:19:10Z
 > (`kraken_enabled.json` generation), then the flag, worker container, and `ops:kraken:*` tasks were removed
 > with the weather-only pivot. Kept as historical reference only.
 
 ## What it gates
 
 `control/kraken_enabled.json` in `gs://${PROJECT_ID}-kalshi-archive/` controls whether the Kraken WS worker
-(HOL-48, not yet deployed at the time of writing) bootstraps and subscribes. When `enabled=false`, the worker
+(not yet deployed at the time of writing) bootstraps and subscribes. When `enabled=false`, the worker
 exits 0 at boot and the worker pool stays warm but does no work. When `enabled=true`, the worker subscribes
 to its configured pair set and emits to `kraken.*` topics.
 
@@ -52,7 +52,7 @@ Default semantics:
 Three sources, in order of usefulness:
 
 1. **`kraken_flag_changed` slog lines** in the consumer (`cmd/kraken-flag-smoke` today; `cmd/kraken-ws-worker`
-   once HOL-48 ships). Carries the `reason`, `actor`, `generation` ULID, and the new `enabled` value from the
+   once the Kraken worker ships). Carries the `reason`, `actor`, `generation` ULID, and the new `enabled` value from the
    body.
 2. **Cloud Audit Logs (Storage Admin Activity)** — every write to the object records the principal
    (`gcloud config get-value account` at task time) plus the API call.
@@ -90,8 +90,6 @@ audit log records the recovery actor.
 
 ## Refs
 
-- HOL-47 issue.
-- HOL-47 research doc (Linear).
 - `internal/featureflag/kraken.go` — implementation.
 - `internal/worker/desiredset.go` — reference poll-loop pattern.
 - Memory `feedback_task_y_for_non_tty` — why `task -y` is required outside a TTY.

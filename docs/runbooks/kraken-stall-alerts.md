@@ -1,10 +1,10 @@
 # Runbook — Kraken WS/bookkeeper stall alerts
 
-> **RETIRED 2026-06-10 (HOL-183).** The alert policies and the `kraken-ws-worker` container were removed with
+> **RETIRED 2026-06-10.** The alert policies and the `kraken-ws-worker` container were removed with
 > the weather-only pivot. Kept as historical reference only.
 
 Three Cloud Monitoring alert policies surface different failure modes that the
-existing BQ row-floor alerts cannot. Filed under HOL-71, driven by the HOL-69
+existing BQ row-floor alerts cannot. Driven by the
 incident (2026-05-20 22:46Z → 2026-05-21 13:41Z: 14h 55m of OTel→Cloud
 Monitoring rejection while BQ rows kept flowing on heartbeat).
 
@@ -14,7 +14,7 @@ Monitoring rejection while BQ rows kept flowing on heartbeat).
 |---|---|---|---|
 | `kraken_ws_book_input_silence` | `workload.googleapis.com/kraken_ws_messages_received_total`, `channel=book` | sum-rate < 10/sec in 5 min | Upstream Kraken WS book channel is producing no frames. The 1 Hz bookkeeper heartbeat masks this on the BQ-row alert; this policy keys on WS input grain. |
 | `kraken_bookkeeper_change_silence` | `workload.googleapis.com/kraken_bookkeeper_snapshots_emitted_total`, `emit_reason=change` | sum-rate < 1/sec in 5 min | Bookkeeper-side stall — WS input may still be flowing, but the apply loop has stopped producing change-reason emits. Plausible causes: checksum-recovery wedge, registry mutex deadlock, internal panic absorbed by recover(). |
-| `otel_points_out_of_order` | `logging.googleapis.com/user/otel_points_out_of_order`, derived from `jsonPayload.msg:"Points must be written in order"` on `resource.labels.worker_pool_name="ws-worker"` | delta > 0 in 5 min | OTel→Cloud Monitoring write rejection (HOL-69 fingerprint). When the SDK is in this state both metric-based alerts above go blind because the series produces no datapoints at all. |
+| `otel_points_out_of_order` | `logging.googleapis.com/user/otel_points_out_of_order`, derived from `jsonPayload.msg:"Points must be written in order"` on `resource.labels.worker_pool_name="ws-worker"` | delta > 0 in 5 min | OTel→Cloud Monitoring write rejection (the 2026-05-20 incident's fingerprint). When the SDK is in this state both metric-based alerts above go blind because the series produces no datapoints at all. |
 
 ### Reading combinations
 
@@ -138,8 +138,7 @@ revision is Ready within ~30 s; first successful OTel write follows within
 > **The `otel-reset` label persists on the pool indefinitely.** With the
 > `hashicorp/google ~> 7.30` provider, keys not declared in the terraform
 > `labels` block live in read-only `effective_labels` and are not
-> reconciled out by `terraform apply` (verified empirically — see HOL-72
-> dossier). The label is functionally inert outside the moment of
+> reconciled out by `terraform apply` (verified empirically). The label is functionally inert outside the moment of
 > application; its only purpose is to force a new revision. Clean up on a
 > future tf-config-side touch of the pool, or on demand:
 >
@@ -149,10 +148,10 @@ revision is Ready within ~30 s; first successful OTel write follows within
 >   --remove-labels=otel-reset
 > ```
 >
-> **Persist in IaC: no (HOL-72 decision).** Under incident conditions the
+> **Persist in IaC: no (deliberate decision).** Under incident conditions the
 > gcloud one-liner is faster than a `var.otel_reset` tfvar bump →
 > `task ops:tf:apply` cycle. The recovery audit trail lives in this
-> runbook + Linear (HOL-69 timeline + HOL-72 dossier), not in tf state.
+> runbook and the incident timeline, not in tf state.
 
 Verify recovery:
 
@@ -168,12 +167,12 @@ gcloud logging read \
    AND jsonPayload.msg:"Points must be written in order"' \
   --project=<your-gcp-project> --freshness=10m --limit=5
 
-# 3. OTel metric datapoints landing on the new node_id. Post-HOL-111 each
+# 3. OTel metric datapoints landing on the new node_id. Since the per-boot fix each
 #    container exports a distinct per-boot node_id of the form
 #    "<K_REVISION>/<service>/<boot-id>" (e.g.
 #    ws-worker-00041-bpx/kraken-ws-worker/8f6e33c4acb79e5a). The /<service>
-#    segment (HOL-70) separates sibling containers; the /<boot-id> segment
-#    (HOL-111, kraken from HOL-115 / v0.3.2) makes every process start
+#    segment separates sibling containers; the /<boot-id> segment
+#    (kraken from v0.3.2) makes every process start
 #    distinct so an in-place restart cannot collide on a shared start_time.
 END=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 START=$(date -u -v-5M '+%Y-%m-%dT%H:%M:%SZ')
@@ -188,8 +187,8 @@ curl -s -G -H "Authorization: Bearer $(gcloud auth print-access-token)" \
 
 # 4. BQ continuity across the cutover. A gap-free per-minute row count
 #    across the restart timestamp confirms the bookkeeper kept publishing
-#    real deltas to BQ even while OTel writes were rejected (HOL-69
-#    Phase 8.4 verification pattern).
+#    real deltas to BQ even while OTel writes were rejected (the
+#    2026-05-20 incident's verification pattern).
 bq query --project_id=<your-gcp-project> --use_legacy_sql=false \
   'SELECT TIMESTAMP_TRUNC(event_ts, MINUTE) AS minute,
           COUNT(*) AS rows_
@@ -205,7 +204,7 @@ non-zero rate + gap-free per-minute counts in (4) → mitigated.
 ### Mitigation B — Upstream Kraken WS book silence (alert `kraken_ws_book_input_silence` only)
 
 This is usually Kraken-side instability that the worker cannot fix. The
-silent-stall watchdog (HOL-54) should already be force-reconnecting; verify:
+silent-stall watchdog should already be force-reconnecting; verify:
 
 ```sh
 curl -G -H "Authorization: Bearer $(gcloud auth print-access-token)" \
@@ -272,7 +271,7 @@ requires the real failure mode or a deliberate ws-worker pool log injection
 
 ## Incidents
 
-### HOL-111 (2026-05-30→31): in-place-restart start_time poisoning
+### 2026-05-30→31: in-place-restart start_time poisoning
 
 On 2026-05-30→31 an in-place ws-worker pool restart wedged every OTel
 cumulative metric series for ~25h across both pool containers (`ws-worker`
@@ -292,7 +291,7 @@ Cloud Monitoring sees the restarted process attempt to write cumulative-counter
 points with a new start_time that predates the last-known start_time for that
 series and rejects them until ~25h have elapsed.
 
-**Fix (this slice — HOL-111):** each process start now derives a per-boot
+**Fix:** each process start now derives a per-boot
 `node_id` of the form `<K_REVISION>/<service>/<boot-id>`. A restart inside the
 same revision generates a per-boot token (8 random bytes from crypto/rand, hex-encoded — 16 hex chars), so the series is new to Cloud Monitoring
 and OTel writes succeed immediately. The revision-rollover gcloud one-liner in
@@ -304,14 +303,10 @@ revision, self-heal is ~25h; the Mitigation A rollover shortens it to ~60s.
 
 ## References
 
-- HOL-71 (this alert work).
-- HOL-69 — Incident post-mortem; investigation log
-  (internal design docs, not included in this public snapshot) and data-impact phase 10 doc on Linear.
-- HOL-70 — Per-container OTel `node_id` split (the reason the alert filters
-  do not pin `node_id`).
-- HOL-72 — OTel start_time recovery runbook (this Mitigation A); decided
-  against persisting `otel-reset` in IaC.
-- HOL-54 — Kraken silent-stall watchdog.
+- Incident post-mortem and investigation log: private tracker (not included in
+  this public snapshot).
+- Per-container OTel `node_id` split: the reason the alert filters do not pin
+  `node_id`.
 - `infra/cloud-monitoring-alerts.tf` — alert + log-metric definitions.
 - `infra/dashboards/main.json` — companion dashboard tiles for the three
   metrics.

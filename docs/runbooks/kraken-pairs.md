@@ -1,6 +1,6 @@
 # Kraken pair subscription
 
-> **RETIRED 2026-06-10 (HOL-183).** The `kraken-ws-worker` container, `kraken_raw` dataset, pair manifest, and
+> **RETIRED 2026-06-10.** The `kraken-ws-worker` container, `kraken_raw` dataset, pair manifest, and
 > `ops:kraken:*` tasks were removed with the weather-only pivot. Kept as historical reference only.
 
 Add, remove, list, or refresh the set of Kraken WS pairs the production `kraken-ws-worker` pool subscribes to. Companion runbook to [`series-subscription.md`](series-subscription.md); the two ops surfaces share shape but live in separate datasets and target separate workers.
@@ -121,7 +121,7 @@ Rejection row appears in `kraken_raw.subscription_log` with `action='reject'`. F
 
 ### WS subscribe ack `success: false` mid-session
 
-Worker logs from HOL-48's dispatch handler (around `kraken_subscribe_ack`). Pair flipped to `cancel_only` / `maintenance` mid-session. Remove via `ops:kraken:remove` if the state is persistent.
+Worker logs from the Kraken worker's dispatch handler (around `kraken_subscribe_ack`). Pair flipped to `cancel_only` / `maintenance` mid-session. Remove via `ops:kraken:remove` if the state is persistent.
 
 ### Boot-time control file absent
 
@@ -160,4 +160,3 @@ Triggers a synchronous `series-discovery` Cloud Run Job execution. Use after a `
 - Design: internal design doc (not included in this public snapshot).
 - Implementation plan: internal doc (not included in this public snapshot).
 - Kraken-side agent skill: internal doc (not included in this public snapshot).
-- Tracker: HOL-49 (parent HOL-45).

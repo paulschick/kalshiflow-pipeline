@@ -1,0 +1,477 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kalshiflow pipeline</title>
+<meta name="description" content="A solo-built, production-operated GCP pipeline that captured Kalshi prediction-market WebSocket feeds into BigQuery and a Parquet archive. Ran May–June 2026.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='1' y='9' width='3' height='6' rx='1' fill='%232a78d6'/%3E%3Crect x='6.5' y='5' width='3' height='10' rx='1' fill='%232a78d6'/%3E%3Crect x='12' y='1' width='3' height='14' rx='1' fill='%232a78d6'/%3E%3C/svg%3E">
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7;
+  --surface: #fcfcfb;
+  --ink: #0b0b0b;
+  --ink-2: #52514e;
+  --muted: #6f6d68;
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+  --border: rgba(11,11,11,0.10);
+  --accent: #2a78d6;
+  --accent-wash: rgba(42,120,214,0.10);
+  --deemph: #c3c2b7;
+  --band: rgba(137,135,129,0.14);
+  --code-bg: #f0efec;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page: #0d0d0d;
+    --surface: #1a1a19;
+    --ink: #ffffff;
+    --ink-2: #c3c2b7;
+    --muted: #9a988f;
+    --grid: #2c2c2a;
+    --axis: #383835;
+    --border: rgba(255,255,255,0.10);
+    --accent: #3987e5;
+    --accent-wash: rgba(57,135,229,0.14);
+    --deemph: #4a4a46;
+    --band: rgba(195,194,183,0.10);
+    --code-bg: #262624;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d;
+  --surface: #1a1a19;
+  --ink: #ffffff;
+  --ink-2: #c3c2b7;
+  --muted: #9a988f;
+  --grid: #2c2c2a;
+  --axis: #383835;
+  --border: rgba(255,255,255,0.10);
+  --accent: #3987e5;
+  --accent-wash: rgba(57,135,229,0.14);
+  --deemph: #4a4a46;
+  --band: rgba(195,194,183,0.10);
+  --code-bg: #262624;
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--page);
+  color: var(--ink);
+  font: 16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+a { color: var(--accent); text-underline-offset: 2px; }
+code {
+  font: 0.88em ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: var(--code-bg);
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+  overflow-wrap: anywhere;
+}
+.wrap { max-width: 960px; margin: 0 auto; padding: 0 16px; }
+header.hero { padding: 64px 0 32px; }
+.eyebrow { color: var(--muted); font-size: 14px; letter-spacing: 0.02em; margin: 0 0 8px; }
+h1 { font-size: clamp(32px, 6vw, 48px); line-height: 1.1; margin: 0 0 16px; letter-spacing: -0.02em; }
+.lede { font-size: 19px; color: var(--ink-2); max-width: 44em; margin: 0 0 24px; }
+.links { display: flex; flex-wrap: wrap; gap: 12px; }
+.btn {
+  display: inline-block; padding: 8px 14px; border-radius: 8px; text-decoration: none;
+  border: 1px solid var(--border); color: var(--ink); background: var(--surface); font-size: 15px;
+}
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.status {
+  margin-top: 24px; padding: 12px 16px; border-left: 3px solid var(--axis);
+  background: var(--surface); border-radius: 0 8px 8px 0; color: var(--ink-2); font-size: 15px;
+}
+
+section { padding: 40px 0; border-top: 1px solid var(--grid); }
+h2 { font-size: 24px; margin: 0 0 8px; letter-spacing: -0.01em; }
+.sub { color: var(--ink-2); margin: 0 0 24px; max-width: 46em; }
+
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }
+.tile { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
+.tile .label { color: var(--ink-2); font-size: 14px; margin: 0; }
+.tile .value { font-size: 30px; font-weight: 600; margin: 4px 0 2px; letter-spacing: -0.01em; }
+.tile .note { color: var(--muted); font-size: 13px; margin: 0; }
+
+.flow { display: grid; gap: 8px; grid-template-columns: 1fr; }
+.stage {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px;
+}
+.stage h3 { margin: 0 0 4px; font-size: 16px; }
+.stage p { margin: 0; font-size: 14px; color: var(--ink-2); }
+.stage .svc { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
+.arrow { text-align: center; color: var(--muted); font-size: 18px; line-height: 1; }
+.side { display: grid; gap: 12px; grid-template-columns: 1fr; margin-top: 16px; }
+.side .stage { border-style: dashed; }
+@media (min-width: 760px) {
+  .flow { grid-template-columns: 1fr auto 1fr auto 1fr auto 1fr auto 1fr; align-items: stretch; }
+  .arrow { align-self: center; }
+  .arrow span { display: inline-block; transform: rotate(-90deg); }
+  .side { grid-template-columns: 1fr 1fr; }
+}
+
+.chart-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px 16px 12px; margin-bottom: 16px; position: relative; }
+.chart-card h3 { margin: 0; font-size: 17px; }
+.chart-card .caption { color: var(--ink-2); font-size: 14px; margin: 4px 0 12px; }
+.chart { width: 100%; position: relative; }
+.chart svg { display: block; width: 100%; height: auto; overflow: visible; }
+.chart text { font: 12px system-ui, -apple-system, "Segoe UI", sans-serif; fill: var(--muted); font-variant-numeric: tabular-nums; }
+.chart text.anno { fill: var(--ink-2); }
+.chart .hit { fill: transparent; cursor: default; }
+.chart .hit:focus { outline: none; }
+.chart .hit:focus-visible { stroke: var(--ink); stroke-width: 1; }
+.tip {
+  position: absolute; pointer-events: none; background: var(--surface); color: var(--ink);
+  border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 13px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.12); white-space: nowrap; opacity: 0; transition: opacity 80ms;
+}
+.tip strong { display: block; font-size: 15px; }
+.tip span { color: var(--ink-2); }
+details.table { margin-top: 8px; font-size: 14px; }
+details.table summary { cursor: pointer; color: var(--ink-2); }
+details.table .scroll { overflow-x: auto; max-height: 320px; }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+th, td { text-align: right; padding: 4px 8px; border-bottom: 1px solid var(--grid); }
+th:first-child, td:first-child { text-align: left; }
+th { color: var(--ink-2); font-weight: 600; }
+
+.cards { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 18px; }
+.card h3 { margin: 0 0 6px; font-size: 17px; }
+.card .when { color: var(--muted); font-size: 13px; margin: 0 0 8px; }
+.card p { margin: 0 0 8px; font-size: 15px; color: var(--ink-2); }
+.card p:last-child { margin-bottom: 0; }
+.card .fix { color: var(--ink); }
+.card .fix::before { content: "Fix: "; font-weight: 600; }
+.card .lesson::before { content: "Lesson: "; font-weight: 600; color: var(--ink); }
+
+.stack { display: flex; flex-wrap: wrap; gap: 8px; padding: 0; margin: 0; list-style: none; }
+.stack li { background: var(--surface); border: 1px solid var(--border); border-radius: 999px; padding: 4px 12px; font-size: 14px; }
+ol.steps { padding-left: 20px; color: var(--ink-2); }
+ol.steps li { margin-bottom: 6px; }
+footer { padding: 32px 0 64px; border-top: 1px solid var(--grid); color: var(--muted); font-size: 14px; }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+<header class="hero">
+  <p class="eyebrow">Solo project · Go · Google Cloud · May–June 2026</p>
+  <h1>kalshiflow</h1>
+  <p class="lede">A managed-services pipeline on Google Cloud that recorded Kalshi prediction-market WebSocket feeds (every orderbook change, trade, lifecycle event, and settlement) into BigQuery and a Parquet archive for offline backtesting. I designed, built, and ran it in production on my own.</p>
+  <div class="links">
+    <a class="btn primary" href="https://github.com/paulschick/kalshiflow-pipeline">Source on GitHub</a>
+    <a class="btn" href="https://github.com/paulschick/kalshiflow-pipeline/blob/master/docs/reference/system.md">System reference</a>
+    <a class="btn" href="https://github.com/paulschick/kalshiflow-pipeline/tree/master/docs/runbooks">Runbooks</a>
+  </div>
+  <p class="status"><strong>Status:</strong> ran in production from early May to 2026-06-11, then I tore it down on purpose once it had served its research purpose. The collected data was exported first. Everything below comes from that run's docs and its exported Cloud Monitoring metrics.</p>
+</header>
+
+<section aria-labelledby="numbers">
+  <h2 id="numbers">By the numbers</h2>
+  <p class="sub" id="window-note">Counters from the pipeline's own OpenTelemetry metrics, exported before teardown.</p>
+  <div class="tiles" id="tiles"></div>
+</section>
+
+<section aria-labelledby="arch">
+  <h2 id="arch">Architecture</h2>
+  <p class="sub">One always-on Go worker holds the WebSocket session. Everything downstream is managed services configured in Terraform, so there is no stream processor or database to operate.</p>
+  <div class="flow" role="list">
+    <div class="stage" role="listitem"><div class="svc">Source</div><h3>Kalshi WebSocket</h3><p>Orderbook deltas, trades, and market lifecycle events for the tracked series.</p></div>
+    <div class="arrow" aria-hidden="true"><span>↓</span></div>
+    <div class="stage" role="listitem"><div class="svc">Cloud Run worker pool</div><h3><code>ws-worker</code></h3><p>An in-memory orderbook bookkeeper turns deltas into 1-second top-of-book snapshots. Two independent watchdogs catch stalled connections.</p></div>
+    <div class="arrow" aria-hidden="true"><span>↓</span></div>
+    <div class="stage" role="listitem"><div class="svc">Pub/Sub</div><h3>Protobuf <code>Envelope</code></h3><p>One topic per stream, with a schema-enforced binary envelope and a dead-letter topic.</p></div>
+    <div class="arrow" aria-hidden="true"><span>↓</span></div>
+    <div class="stage" role="listitem"><div class="svc">BigQuery · hot tier</div><h3>Direct subscriptions</h3><p>Pub/Sub writes straight into day-partitioned tables, which are kept 7–14 days. There is no ingest code to run.</p></div>
+    <div class="arrow" aria-hidden="true"><span>↓</span></div>
+    <div class="stage" role="listitem"><div class="svc">GCS · cold tier</div><h3>Daily Parquet</h3><p>A Cloud Run job exports each day's partitions as Hive-partitioned, Snappy-compressed Parquet for backtesting.</p></div>
+  </div>
+  <div class="side">
+    <div class="stage"><div class="svc">Control plane</div><h3>Series discovery</h3><p>A 6-hourly job refreshes the Kalshi catalog and writes the desired series set to a GCS JSON object with <code>If-Generation-Match</code>. The worker polls it every 60 s and re-subscribes in place, with no redeploy.</p></div>
+    <div class="stage"><div class="svc">Observability</div><h3>OpenTelemetry → Cloud Monitoring</h3><p>Custom counters for every stage, a data-flow-ordered dashboard, alert policies, and a runbook for each incident class I saw in production.</p></div>
+  </div>
+</section>
+
+<section aria-labelledby="ops">
+  <h2 id="ops">What it looked like running</h2>
+  <p class="sub">Two views from the exported metrics. Hover or focus a column for values; each chart also has a table view.</p>
+
+  <div class="chart-card">
+    <h3>WebSocket messages received per day</h3>
+    <p class="caption">All streams. Nearly all of it is orderbook deltas; the bookkeeper condenses them before anything is published.</p>
+    <div class="chart" id="chart-daily"></div>
+    <details class="table"><summary>Table view</summary><div class="scroll"><table id="table-daily"></table></div></details>
+  </div>
+
+  <div class="chart-card">
+    <h3>Data-stall force-reconnects by hour of day (UTC)</h3>
+    <p class="caption" id="stall-caption"></p>
+    <div class="chart" id="chart-stall"></div>
+    <details class="table"><summary>Table view</summary><div class="scroll"><table id="table-stall"></table></div></details>
+  </div>
+</section>
+
+<section aria-labelledby="decisions">
+  <h2 id="decisions">Design decisions</h2>
+  <p class="sub">Each of these was settled with a measurement, not a guess.</p>
+  <div class="cards">
+    <div class="card">
+      <h3>Protobuf envelope on the wire</h3>
+      <p>I cut the Pub/Sub wire format over from JSON to a schema-registered protobuf <code>Envelope</code> (2026-05-04), which roughly halved row size (~270 B → ~135 B). The BigQuery payload column became <code>BYTES</code>, and Parquet carries it unchanged.</p>
+    </div>
+    <div class="card">
+      <h3>Measure the filter before claiming the saving</h3>
+      <p>Back-of-envelope math said a top-2-price filter on orderbook deltas would drop ~80% of volume. Replaying 286k real deltas through the bookkeeper showed <strong>~45%</strong>, because activity concentrates at the top of the book. The design shipped on the measured number.</p>
+    </div>
+    <div class="card">
+      <h3>GCS JSON for control state, not BigQuery</h3>
+      <p>BigQuery on-demand bills at least 10 MB per query, so polling it every 60 s for a tiny desired-set costs far more than the data justifies. A generation-checked GCS object does the same job inside the free tier.</p>
+    </div>
+    <div class="card">
+      <h3>Managed ingest, no stream processor</h3>
+      <p>Pub/Sub → BigQuery subscriptions plus a daily export job replaced a custom ingest service. The only always-on compute is the WebSocket worker.</p>
+    </div>
+    <div class="card">
+      <h3>Know the platform's billing floor</h3>
+      <p>A Cloud Run worker pool with always-allocated CPU has a floor of 1 vCPU / 512 MiB. Retiring a sidecar container saved <strong>$0</strong> of compute, not the ~$8/mo a naive estimate predicted. I re-checked the cost against the Cloud Billing Catalog before stating it.</p>
+    </div>
+    <div class="card">
+      <h3>Every cost claim cites a SKU</h3>
+      <p>Monthly cost was ~$17, almost all of it the worker pool (CPU SKU <code>77E7-D935-BA67</code> + memory <code>967D-19B3-F10F</code>, us-east4, verified 2026-06-10). Everything else stayed under free-tier thresholds, and each line item is listed in the <a href="https://github.com/paulschick/kalshiflow-pipeline/blob/master/docs/reference/system.md#cost">cost breakdown</a>.</p>
+    </div>
+  </div>
+</section>
+
+<section aria-labelledby="incidents">
+  <h2 id="incidents">Incidents and what they taught</h2>
+  <p class="sub">The bugs that made it to production, and the detection I built so each one would not recur silently.</p>
+  <div class="cards">
+    <div class="card">
+      <h3>Silent WebSocket stall</h3>
+      <p class="when">2026-05-05 · ~58 minutes</p>
+      <p>The TCP connection stayed open while Kalshi stopped sending data, so no reconnect fired. The giveaway was that snapshot rows arrived at a perfectly flat 796/min: the bookkeeper's heartbeat was the only output.</p>
+      <p class="fix">Two independent watchdogs: a ping/pong deadline at the socket layer and a 90 s trading-frame deadline at the application layer, each with its own counters and a per-tick liveness heartbeat.</p>
+    </div>
+    <div class="card">
+      <h3>Watchdog masked by lifecycle chatter</h3>
+      <p class="when">2026-05-08</p>
+      <p>Exchange-wide lifecycle events at market rollover kept resetting the data-stall deadline while the tracked markets had gone silent.</p>
+      <p class="fix">Frames are sorted into trading and lifecycle buckets, and only trading frames count as liveness.</p>
+    </div>
+    <div class="card">
+      <h3>Unsubscribe flood at rollover</h3>
+      <p class="when">2026-05-08 12:01 UTC</p>
+      <p>Explicit unsubscribes for settled markets raced Kalshi's own server-side retirement and produced a flood of <code>code:7 Unknown subscription ID</code> errors.</p>
+      <p class="fix">Stop unsubscribing: rely on server-side auto-retire and evict locally, behind an env kill-switch that can restore the old behavior.</p>
+    </div>
+    <div class="card">
+      <h3>Overnight trading famine</h3>
+      <p class="when">recurring, 07–10 UTC</p>
+      <p>In the pre-dawn US window the feed can go many minutes without a single trade or book change. The watchdog correctly trips and cycles, and no data is lost.</p>
+      <p class="lesson">Not every alert is a bug. The runbook gives a four-signal fingerprint that separates expected famine from a real stall.</p>
+    </div>
+    <div class="card">
+      <h3>Restart poisoned all metrics for ~25 h</h3>
+      <p class="when">2026-05-30 → 31</p>
+      <p>An in-place restart reused the OpenTelemetry resource identity, so Cloud Monitoring rejected every cumulative point with an earlier start time. Ingest was fine, but the dashboards went dark. The alert meant to catch it matched zero logs because it used the wrong label and payload field.</p>
+      <p class="fix">A per-boot <code>node_id</code> for each process, a unit test that stops <code>service.instance.id</code> from silently changing the resource type, and a repaired alert filter.</p>
+    </div>
+    <div class="card">
+      <h3>Pub/Sub → BigQuery silent hang</h3>
+      <p class="when">early build</p>
+      <p>Sending a nested JSON object into a BigQuery <code>JSON</code> column made the direct subscription retry forever, with no error, no dead-letter entry, and no rows.</p>
+      <p class="lesson">A parallel pull subscription is the check that always works. The protobuf/<code>BYTES</code> cutover later removed this failure mode entirely.</p>
+    </div>
+  </div>
+</section>
+
+<section aria-labelledby="reuse">
+  <h2 id="reuse">Reusing it as a reference architecture</h2>
+  <p class="sub">The repository is a scrubbed public snapshot with every GCP identifier replaced by a placeholder. It deploys into a fresh project:</p>
+  <ol class="steps">
+    <li>Enable the APIs and create a Terraform state bucket.</li>
+    <li>Fill in <code>infra/terraform.tfvars</code> from the example.</li>
+    <li>Create the Artifact Registry repo, then build and push the three images.</li>
+    <li><code>terraform apply</code>, add the Kalshi API key to Secret Manager, and smoke-test.</li>
+  </ol>
+  <p class="sub">The full ordered steps are in the <a href="https://github.com/paulschick/kalshiflow-pipeline#deploying-to-a-fresh-gcp-project">README</a>.</p>
+  <ul class="stack" aria-label="Technologies">
+    <li>Go</li><li>Protocol Buffers</li><li>Terraform</li><li>Cloud Run worker pools &amp; jobs</li><li>Pub/Sub</li>
+    <li>BigQuery</li><li>Cloud Storage · Parquet</li><li>Cloud Scheduler</li><li>Secret Manager</li>
+    <li>OpenTelemetry</li><li>Cloud Monitoring</li><li>GitHub Actions</li>
+  </ul>
+</section>
+</div>
+
+<footer>
+  <div class="wrap">
+    Built and operated by <a href="https://github.com/paulschick">Paul Schick</a>. Charts are generated from the exported metrics by
+    <a href="https://github.com/paulschick/kalshiflow-pipeline/blob/master/scripts/showcase_metrics.py"><code>scripts/showcase_metrics.py</code></a>.
+  </div>
+</footer>
+
+<div class="tip" id="tip" role="status" aria-live="polite"></div>
+<script src="metrics.js"></script>
+<script>
+(function () {
+  "use strict";
+  var M = window.METRICS;
+  var NS = "http://www.w3.org/2000/svg";
+  var tip = document.getElementById("tip");
+
+  function fmtCompact(n) {
+    if (n >= 1e9) return (n / 1e9).toFixed(2).replace(/\.?0+$/, "") + "B";
+    if (n >= 1e6) return (n / 1e6).toFixed(1).replace(/\.0$/, "") + "M";
+    if (n >= 1e3) return (n / 1e3).toFixed(1).replace(/\.0$/, "") + "K";
+    return String(n);
+  }
+  function fmt(n) { return n.toLocaleString("en-US"); }
+  function el(name, attrs, parent) {
+    var e = document.createElementNS(NS, name);
+    for (var k in attrs) e.setAttribute(k, attrs[k]);
+    if (parent) parent.appendChild(e);
+    return e;
+  }
+  function text(parent, x, y, s, attrs) {
+    var t = el("text", Object.assign({ x: x, y: y }, attrs || {}), parent);
+    t.textContent = s;
+    return t;
+  }
+  function dayLabel(iso) {
+    var d = new Date(iso + "T00:00:00Z");
+    return d.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
+  }
+  function niceMax(v) {
+    var p = Math.pow(10, Math.floor(Math.log10(v)));
+    var steps = [1, 2, 2.5, 5, 10];
+    for (var i = 0; i < steps.length; i++) if (steps[i] * p >= v) return steps[i] * p;
+    return 10 * p;
+  }
+
+  function showTip(card, evt, strong, rest) {
+    tip.replaceChildren();
+    var s = document.createElement("strong"); s.textContent = strong; tip.appendChild(s);
+    rest.forEach(function (line) { var sp = document.createElement("span"); sp.textContent = line; tip.appendChild(sp); tip.appendChild(document.createElement("br")); });
+    if (tip.lastChild && tip.lastChild.nodeName === "BR") tip.removeChild(tip.lastChild);
+    var r = evt.target.getBoundingClientRect();
+    var tw = tip.offsetWidth, th = tip.offsetHeight;
+    var x = window.scrollX + r.left + r.width / 2 - tw / 2;
+    x = Math.max(window.scrollX + 8, Math.min(x, window.scrollX + document.documentElement.clientWidth - tw - 8));
+    var y = window.scrollY + r.top - th - 8;
+    if (y < window.scrollY + 8) y = window.scrollY + r.bottom + 8;
+    tip.style.left = x + "px"; tip.style.top = y + "px"; tip.style.opacity = "1";
+  }
+  function hideTip() { tip.style.opacity = "0"; }
+
+  // Column chart: data = [{label, value, color, tipTitle, tipLines, tick}], opts = {bands, ariaLabel}
+  function columns(container, data, opts) {
+    var W = 880, H = 280, m = { t: 28, r: 8, b: 28, l: 48 };
+    var iw = W - m.l - m.r, ih = H - m.t - m.b;
+    var svg = el("svg", { viewBox: "0 0 " + W + " " + H, role: "img", "aria-label": opts.ariaLabel }, container);
+    var max = niceMax(Math.max.apply(null, data.map(function (d) { return d.value; })));
+    var bw = iw / data.length;
+    var barW = Math.min(24, Math.max(4, bw - 4));
+    (opts.bands || []).forEach(function (b) {
+      el("rect", { x: m.l + b.from * bw, y: m.t, width: (b.to - b.from + 1) * bw, height: ih, fill: "var(--band)" }, svg);
+      text(svg, m.l + b.from * bw + 4, m.t - 8, b.label, { "class": "anno" });
+    });
+    for (var i = 0; i <= 4; i++) {
+      var v = max * i / 4, y = m.t + ih - ih * i / 4;
+      el("line", { x1: m.l, x2: W - m.r, y1: y, y2: y, stroke: i === 0 ? "var(--axis)" : "var(--grid)", "stroke-width": 1 }, svg);
+      text(svg, m.l - 8, y + 4, opts.yFmt(v), { "text-anchor": "end" });
+    }
+    data.forEach(function (d, i) {
+      var x = m.l + i * bw + (bw - barW) / 2;
+      var h = ih * d.value / max, y = m.t + ih - h;
+      if (h > 0) {
+        var r = Math.min(4, h, barW / 2);
+        var path = "M" + x + "," + (m.t + ih) + "V" + (y + r) + "Q" + x + "," + y + " " + (x + r) + "," + y +
+          "H" + (x + barW - r) + "Q" + (x + barW) + "," + y + " " + (x + barW) + "," + (y + r) + "V" + (m.t + ih) + "Z";
+        el("path", { d: path, fill: d.color }, svg);
+      }
+      if (d.tick) text(svg, m.l + i * bw + bw / 2, H - 8, d.tick, { "text-anchor": "middle" });
+      var hit = el("rect", { x: m.l + i * bw, y: m.t, width: bw, height: ih, "class": "hit", tabindex: 0, "aria-label": d.tipTitle + ": " + d.tipLines.join(", ") }, svg);
+      var on = function (evt) { showTip(container, evt, d.tipTitle, d.tipLines); };
+      hit.addEventListener("pointerenter", on); hit.addEventListener("focus", on);
+      hit.addEventListener("pointerleave", hideTip); hit.addEventListener("blur", hideTip);
+    });
+  }
+
+  function table(id, head, rows) {
+    var t = document.getElementById(id);
+    var tr = document.createElement("tr");
+    head.forEach(function (h) { var th = document.createElement("th"); th.textContent = h; tr.appendChild(th); });
+    t.appendChild(tr);
+    rows.forEach(function (r) {
+      var tr = document.createElement("tr");
+      r.forEach(function (c) { var td = document.createElement("td"); td.textContent = c; tr.appendChild(td); });
+      t.appendChild(tr);
+    });
+  }
+
+  // Tiles
+  var T = M.totals, w = M.window;
+  document.getElementById("window-note").textContent =
+    "Counters from the pipeline's own OpenTelemetry metrics, " + dayLabel(w.from) + " – " + dayLabel(w.to) + ", 2026 (" + w.days + " full UTC days), exported before teardown.";
+  var tiles = [
+    ["WebSocket messages processed", fmtCompact(T.ws_messages), "over " + w.days + " days"],
+    ["Orderbook snapshots emitted", fmtCompact(T.snapshots_change + T.snapshots_heartbeat), fmtCompact(T.snapshots_change) + " on change, " + fmtCompact(T.snapshots_heartbeat) + " heartbeats"],
+    ["Rows archived to Parquet", fmtCompact(T.parquet_rows_exported_kalshi), "daily export, all four streams"],
+    ["Monthly cost while running", "~$17", "worker pool $16.84; rest in free tier"]
+  ];
+  var tilesEl = document.getElementById("tiles");
+  tiles.forEach(function (t) {
+    var d = document.createElement("div"); d.className = "tile";
+    [["p", "label", t[0]], ["p", "value", t[1]], ["p", "note", t[2]]].forEach(function (x) {
+      var e = document.createElement(x[0]); e.className = x[1]; e.textContent = x[2]; d.appendChild(e);
+    });
+    tilesEl.appendChild(d);
+  });
+
+  // Daily messages
+  var streams = ["orderbook_delta", "trade", "lifecycle", "settlement"];
+  var days = M.daily_messages;
+  var idx = function (iso) { for (var i = 0; i < days.length; i++) if (days[i].date === iso) return i; return -1; };
+  var dailyData = days.map(function (d, i) {
+    var total = streams.reduce(function (a, s) { return a + d[s]; }, 0);
+    return {
+      value: total, color: "var(--accent)",
+      tick: (i % 7 === 0) ? dayLabel(d.date) : "",
+      tipTitle: fmt(total) + " messages", tipLines: [dayLabel(d.date) + " · " + fmt(d.trade) + " trades"]
+    };
+  });
+  var bands = [];
+  if (idx("2026-05-30") >= 0 && idx("2026-06-01") >= 0) bands.push({ from: idx("2026-05-30"), to: idx("2026-06-01"), label: "Metrics dark (restart), ingest unaffected" });
+  columns(document.getElementById("chart-daily"), dailyData, { ariaLabel: "Column chart of WebSocket messages received per day", yFmt: fmtCompact, bands: bands });
+  table("table-daily", ["Date"].concat(streams).concat(["total"]), days.map(function (d) {
+    return [d.date].concat(streams.map(function (s) { return fmt(d[s]); })).concat([fmt(dailyData[idx(d.date)].value)]);
+  }));
+
+  // Stalls by hour
+  var hrs = M.stall_reconnects_by_utc_hour;
+  var tot = hrs.reduce(function (a, b) { return a + b; }, 0);
+  var inWin = hrs.slice(7, 10).reduce(function (a, b) { return a + b; }, 0);
+  document.getElementById("stall-caption").textContent =
+    inWin + " of " + tot + " trips (" + Math.round(100 * inWin / tot) + "%) fell between 07:00 and 10:00 UTC, the pre-dawn US window when trading goes quiet. The watchdog is responding to real upstream silence, not flapping.";
+  var stallData = hrs.map(function (v, h) {
+    var hh = (h < 10 ? "0" : "") + h + ":00";
+    return {
+      value: v, color: (h >= 7 && h < 10) ? "var(--accent)" : "var(--deemph)",
+      tick: (h % 3 === 0) ? hh : "",
+      tipTitle: v + (v === 1 ? " trip" : " trips"), tipLines: [hh + "–" + (h < 9 ? "0" : "") + (h + 1) + ":00 UTC"]
+    };
+  });
+  columns(document.getElementById("chart-stall"), stallData, { ariaLabel: "Column chart of data-stall force-reconnects by UTC hour", yFmt: function (v) { return String(Math.round(v)); } });
+  table("table-stall", ["UTC hour", "trips"], hrs.map(function (v, h) { return [(h < 10 ? "0" : "") + h + ":00", String(v)]; }));
+})();
+</script>
+</body>
+</html>

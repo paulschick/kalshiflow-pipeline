@@ -33,7 +33,7 @@ Discover with `task -l | grep '^* ops:'`.
 | `task ops:metrics:baseline`                           | Print 24h baseline numbers (rows/24h per stream×series + DLQ rows)                        |
 
 The `task ops:kraken:*` surface (check/add/remove/list/discover, on/off/status) is retired — the Kraken side
-(worker container, topics, `kraken_raw` tables, control objects) was removed 2026-06-10 (HOL-183).
+(worker container, topics, `kraken_raw` tables, control objects) was removed 2026-06-10.
 
 ## Dashboard tiles worth knowing
 
@@ -77,7 +77,7 @@ gcloud run jobs execute parquet-exporter \
 ```
 
 Replay covers all four Kalshi streams for the given date (the binary loops over
-`streamConfigs()`; the two Kraken streams were removed 2026-06-10, HOL-183). Idempotent —
+`streamConfigs()`; the two Kraken streams were removed 2026-06-10). Idempotent —
 BQ Extract overwrites GCS objects in-place.
 Cost is effectively zero (Extract is free; in-region GCS writes are free).
 
@@ -95,12 +95,11 @@ the manual work.
 | [`series-subscription`](../runbooks/series-subscription.md)          | Add, remove, list, or refresh tracked Kalshi series (routine)                                          |
 | [`update-kalshi-series`](../runbooks/update-kalshi-series.md)        | DR fallback only (both `series_desired.json` AND `subscription_log` gone) — deprecated for routine use |
 
-## Caveats from past sessions (memory)
+## Caveats learned in production
 
-- Do NOT alias BigQuery columns as `rows` in `bq query` — collides with the row-count column name. See memory
-  `project_ops_taskfile`.
+- Do NOT alias BigQuery columns as `rows` in `bq query` — collides with the row-count column name.
 - Do NOT combine `write_metadata=true` with `use_table_schema=true` on Pub/Sub→BQ subs — every row whose body schema
-  doesn't match the table is silently rejected. See memory `pubsub_bq_write_metadata`.
-- Pre-Plan-2.7 rule: `raw_payload` JSON columns require `json.dumps()` before publish (BQ-direct subs hang silently
-  otherwise). Post-Plan-2.7, kalshiflow uses `BYTES` not JSON, so this no longer applies HERE — but the rule remains
-  valid for projects that still use JSON columns. See memory `pubsub_bq_json_payload`.
+  doesn't match the table is silently rejected.
+- Pre-protobuf rule: `raw_payload` JSON columns require `json.dumps()` before publish (BQ-direct subs hang silently
+  otherwise). Since the 2026-05-04 protobuf cutover kalshiflow uses `BYTES` not JSON, so this no longer applies here —
+  but the rule remains valid for projects that still use JSON columns.
