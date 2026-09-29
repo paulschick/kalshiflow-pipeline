@@ -11,11 +11,11 @@ on each gap. It will cycle (force-close → exp-backoff reconnect → REST
 enumerate + initial subscribe → 90 s grace → next trip) until upstream
 volume returns near US pre-open (≈ 09:00–09:10Z).
 
-Filed under [HOL-73](https://linear.app/holdlayer/issue/HOL-73). Driven by
+Filed under HOL-73. Driven by
 the 5/21 incident inside the larger
-[HOL-69](https://linear.app/holdlayer/issue/HOL-69) window; data-impact
+HOL-69 window; data-impact
 phase 10 of HOL-69 confirmed
-[zero data loss](https://linear.app/holdlayer/document/hol-69-phase-10-data-impact-confirmation-no-kraken-book-data-loss-8375733ff9d4)
+zero data loss
 during the watchdog-cycling sub-window.
 
 ## Why this is expected, not a regression
@@ -43,7 +43,7 @@ All four signals must match. Two or three matching with one missing
 points to a different failure mode (see "When to escalate" below).
 
 1. **Window.** 08–10Z UTC (97 % of 30-day `data_timeout` reconnects
-   cluster here; per [HOL-73 — Gap analysis: WS trading-frame famine on 5/07, 5/14, 5/21](https://linear.app/holdlayer/issue/HOL-73)).
+   cluster here; per HOL-73 — Gap analysis: WS trading-frame famine on 5/07, 5/14, 5/21).
 2. **Trigger.** `workload.googleapis.com/ws_data_stall_force_reconnects_total{trigger="data_timeout"}`
    firing in a tight cycle (typically 1m 36s → 4m 1s between trips).
    `trigger="ping_timeout"` is a different code path (`pingLoop`,
@@ -163,7 +163,7 @@ Any of:
 
   Same caveat as Mitigation A in
   [`kraken-stall-alerts.md`](kraken-stall-alerts.md): the label
-  persists on the pool indefinitely via `effective_labels` ([HOL-72](https://linear.app/holdlayer/issue/HOL-72)
+  persists on the pool indefinitely via `effective_labels` (HOL-72
   decision: not persisted in IaC).
 - BQ `kalshi_raw.orderbook_snapshots_1s` per-minute row count drops to
   zero (not just trading-frame famine + heartbeat continuity) — the
@@ -171,11 +171,11 @@ Any of:
 
 ## References
 
-- [HOL-73](https://linear.app/holdlayer/issue/HOL-73) — investigation
+- HOL-73 — investigation
   + decision tree this runbook closes.
-- [HOL-73 — Pre-investigation data: 30-day pattern + verified code refs](https://linear.app/holdlayer/document/hol-73-pre-investigation-data-30-day-pattern-verified-code-refs-ee8c9bc26f4e)
+- HOL-73 — Pre-investigation data: 30-day pattern + verified code refs
   — 30-day histogram, code-reference validation, recommended queries.
-- [HOL-69](https://linear.app/holdlayer/issue/HOL-69) — parent incident
+- HOL-69 — parent incident
   context. Phase 10 verification doc confirms zero data loss during the
   5/21 watchdog-cycling sub-window.
 - `internal/worker/worker.go:1350-1434` — `dataStallLoop` (the spec
@@ -185,7 +185,7 @@ Any of:
   (where `lastTradingDataAt` / `lastLifecycleAt` are refreshed).
 - `internal/worker/worker.go:702-708` — session-start grace
   initialization + `ws session config` log line.
-- [Silent WS stall fingerprint (heartbeat-only BQ rows)](https://linear.app/holdlayer/issue/HOL-54)
+- Silent WS stall fingerprint (heartbeat-only BQ rows), HOL-54
   — separate failure mode where the TCP is alive but bookkeeper
   heartbeat is the only thing flowing; this runbook is the opposite
   shape (trading silence + lifecycle heartbeat still flowing).

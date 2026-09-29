@@ -159,5 +159,5 @@ Triggers a synchronous `series-discovery` Cloud Run Job execution. Use after a `
 
 - Design: internal design doc (not included in this public snapshot).
 - Implementation plan: internal doc (not included in this public snapshot).
-- Kraken-side skill: `.claude/skills/kraken-integration/SKILL.md`.
-- Linear: [HOL-49](https://linear.app/holdlayer/issue/HOL-49) (parent [HOL-45](https://linear.app/holdlayer/issue/HOL-45)).
+- Kraken-side agent skill: internal doc (not included in this public snapshot).
+- Tracker: HOL-49 (parent HOL-45).

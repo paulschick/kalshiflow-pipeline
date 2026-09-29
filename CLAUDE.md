@@ -117,5 +117,6 @@ bulleted file-by-file summary in the body.
 - System reference: `docs/reference/system.md`
 - Data paths: `docs/reference/data-paths.md`
 - Ops shortcuts: `docs/reference/ops.md`
-- Backlog (issues + milestones): [Kalshiflow Linear project](https://linear.app/holdlayer/project/kalshiflow-1e60addc8327). `docs/next-steps.md` is a pointer to it; pipeline-status snapshot lives there too.
+- Issue IDs in docs (`HOL-nn`) reference a private tracker and are historical tags only; the project is no longer
+  actively developed.
 
