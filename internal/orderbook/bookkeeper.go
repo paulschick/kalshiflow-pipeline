@@ -182,6 +182,16 @@ func (b *Bookkeeper) Run(ctx context.Context) {
 	defer heartbeatTick.Stop()
 
 	for {
+		// A pending reset takes priority. Callers queue Reset before the
+		// session's snapshot anchors; select picks randomly among ready
+		// cases, so without this check a late-scheduled Run could apply
+		// the anchors first and then wipe them with the reset.
+		select {
+		case <-b.resetAll:
+			b.handleReset()
+			continue
+		default:
+		}
 		select {
 		case <-ctx.Done():
 			return
@@ -192,9 +202,7 @@ func (b *Bookkeeper) Run(ctx context.Context) {
 		case t := <-b.deleteMarkets:
 			b.handleDeleteMarket(t)
 		case <-b.resetAll:
-			b.registry.Reset()
-			b.dirty = map[string]map[Side]struct{}{}
-			b.notifySize()
+			b.handleReset()
 		case keep := <-b.retainOnly:
 			keepSet := make(map[string]struct{}, len(keep))
 			for _, t := range keep {
@@ -213,6 +221,12 @@ func (b *Bookkeeper) Run(ctx context.Context) {
 			b.flushHeartbeat()
 		}
 	}
+}
+
+func (b *Bookkeeper) handleReset() {
+	b.registry.Reset()
+	b.dirty = map[string]map[Side]struct{}{}
+	b.notifySize()
 }
 
 func (b *Bookkeeper) notifySize() {

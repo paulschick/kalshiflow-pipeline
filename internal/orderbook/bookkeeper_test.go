@@ -3,6 +3,7 @@ package orderbook
 
 import (
 	"context"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -202,6 +203,39 @@ func TestBookkeeper_ResetClearsAll(t *testing.T) {
 	last := decode(t, pub.snapshot()[len(pub.snapshot())-1])
 	if last.Top1Size != 99 {
 		t.Errorf("post-reset size = %d; want 99 (fresh book)", last.Top1Size)
+	}
+}
+
+// TestBookkeeper_ResetQueuedBeforeSnapshotsNeverWipesThem reproduces the
+// worker's legacy session start: Reset() is queued, then the session's
+// orderbook_snapshot anchors, before the Run goroutine is scheduled. With
+// both channels ready, Run must apply the reset first; if select picks a
+// snapshot first, the reset wipes it and the market never emits.
+func TestBookkeeper_ResetQueuedBeforeSnapshotsNeverWipesThem(t *testing.T) {
+	t.Parallel()
+	tickers := []string{"A", "B", "C"}
+	for i := range 50 {
+		pub := &stubPublisher{}
+		b := NewBookkeeper(BookkeeperConfig{
+			Publish:            pub.publish,
+			ChangeTickInterval: 5 * time.Millisecond,
+			HeartbeatInterval:  10 * time.Second,
+			Now:                time.Now,
+		})
+		b.Reset()
+		for _, tk := range tickers {
+			b.ApplySnapshot(SnapshotMsg{Ticker: tk, Yes: []SnapshotLevel{{PriceUnits: 7700, Size: 100}}})
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		go b.Run(ctx)
+		waitFor(t, time.Second, "every snapshotted market emits (iteration "+strconv.Itoa(i)+")", func() bool {
+			seen := map[string]bool{}
+			for _, c := range pub.snapshot() {
+				seen[c.ticker] = true
+			}
+			return len(seen) == len(tickers)
+		})
+		cancel()
 	}
 }
 
